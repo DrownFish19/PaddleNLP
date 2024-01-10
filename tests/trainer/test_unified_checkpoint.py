@@ -51,7 +51,7 @@ environment_variables = {
 }
 
 pretrain_arguments = {
-    "model_name_or_path": "./tests/trainer/unified-ckpt-llama-500m",
+    "model_name_or_path": "facebook/llama-7b",
     "tokenizer_name_or_path": "facebook/llama-7b",
     "input_dir": "./unified_checkpoint/data/llama",
     "output_dir": "./unified_checkpoint/checkpoints/llama_pretrain_ckpts",
@@ -71,7 +71,7 @@ pretrain_arguments = {
     "warmup_steps": 100,
     "logging_steps": 1,
     "max_steps": 30,
-    "save_steps": 20,
+    "save_steps": 8,
     "eval_steps": 1000,
     "weight_decay": 0.01,
     "fp16": "true",
@@ -107,9 +107,10 @@ def check_acc(log_dir="log"):
     return res
 
 
-def remove_logs(log_dir="log"):
+def remove_logs(log_dir="log", suffix=""):
     if os.path.exists(log_dir):
-        shutil.rmtree(log_dir)
+        # shutil.rmtree(log_dir)
+        shutil.move(log_dir, log_dir + suffix)
 
 
 def remove_ckpt(ckpt_dir):
@@ -197,6 +198,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testTP8")
 
     @require_paddle_at_least_8_gpu
     def testTP4PP2(self):
@@ -211,6 +213,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testTP4PP2")
 
     @require_paddle_at_least_8_gpu
     def testTP4DP2(self):
@@ -225,6 +228,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testTP4DP2")
 
     @require_paddle_at_least_8_gpu
     def testTP4Sharding2(self):
@@ -239,6 +243,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testTP4Sharding2")
 
     @require_paddle_at_least_8_gpu
     def testTP2PP4(self):
@@ -253,6 +258,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testTP2PP4")
 
     @require_paddle_at_least_8_gpu
     def testTP2Sharding4(self):
@@ -267,6 +273,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testTP2Sharding4")
 
     @require_paddle_at_least_8_gpu
     def testPP8(self):
@@ -281,6 +288,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testPP8")
 
     @require_paddle_at_least_8_gpu
     def testPP4DP2(self):
@@ -295,6 +303,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testPP4DP2")
 
     @require_paddle_at_least_8_gpu
     def testPP4Sharding2(self):
@@ -309,6 +318,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testPP4Sharding2")
 
     @require_paddle_at_least_8_gpu
     def testSharding8S1(self):
@@ -323,6 +333,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testSharding8S1")
 
     @require_paddle_at_least_8_gpu
     def testSharding8S2(self):
@@ -337,6 +348,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testSharding8S2")
 
     @require_paddle_at_least_8_gpu
     def testSharding4S1DP2(self):
@@ -351,6 +363,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testSharding4S1DP2")
 
     @require_paddle_at_least_8_gpu
     def testSharding4S2DP2(self):
@@ -365,6 +378,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testSharding4S2DP2")
 
     @require_paddle_at_least_8_gpu
     def testSharding2S1DP4(self):
@@ -379,6 +393,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testSharding2S1DP4")
 
     @require_paddle_at_least_8_gpu
     def testSharding2S2DP4(self):
@@ -393,6 +408,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testSharding2S2DP4")
 
     @require_paddle_at_least_8_gpu
     def testDP8(self):
@@ -407,6 +423,7 @@ class TestUnifiedCheckpointBase(TestMultipleGpus):
             res = check_acc()
             assert len(res) == 2
             np.testing.assert_allclose(res[0], res[1], self.rtol)
+        remove_logs(suffix="-testDP8")
 
 
 class TestUnifiedCheckpointOnN2C4(TestUnifiedCheckpointBase):
@@ -1052,6 +1069,39 @@ class TestUnifiedCheckpointOnN1C8EnableAll(TestUnifiedCheckpointBase):
             self.configs[config_key]["unified_checkpoint_config"] = "enable_all_options"
 
         self.need_allclose = True
+        self.rtol = 1e-7
+
+    def runfrist(self, train_args):
+        self.run_n1c8(self.run_pretrain_file, **train_args)
+
+    def rerun(self, train_args):
+        self.run_n1c8(self.run_pretrain_file, **train_args)
+
+
+class TestUnifiedCheckpointOnN1C8SaveLoadSpeed(TestUnifiedCheckpointBase):
+    def setUp(self):
+        super().setUp()
+        for config_key in self.configs:
+            self.configs[config_key]["unified_checkpoint"] = 1
+            self.configs[config_key]["unified_checkpoint_config"] = "enable_all_options"
+
+        self.need_allclose = False
+        self.rtol = 1e-7
+
+    def runfrist(self, train_args):
+        self.run_n1c8(self.run_pretrain_file, **train_args)
+
+    def rerun(self, train_args):
+        self.run_n1c8(self.run_pretrain_file, **train_args)
+
+
+class TestPaddleCheckpointOnN1C8SaveLoadSpeed(TestUnifiedCheckpointBase):
+    def setUp(self):
+        super().setUp()
+        for config_key in self.configs:
+            self.configs[config_key]["unified_checkpoint"] = 0
+
+        self.need_allclose = False
         self.rtol = 1e-7
 
     def runfrist(self, train_args):

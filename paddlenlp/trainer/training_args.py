@@ -711,7 +711,7 @@ class TrainingArguments:
         metadata={"help": "Whether use lazy data processing."},
     )
     skip_profile_timer: Optional[bool] = field(
-        default=True,
+        default=False,
         metadata={"help": "enable framework timer, will output timeline informatoin in logging and visualdl."},
     )
     distributed_dataloader: Optional[bool] = field(
