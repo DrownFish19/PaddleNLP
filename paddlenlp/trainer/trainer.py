@@ -2060,7 +2060,7 @@ class Trainer:
 
         optimizer_name = _add_variant(OPTIMIZER_NAME, self.args.optimizer_name_suffix)
 
-        if self.args.use_hybrid_parallel:
+        if not self.args.ignore_save_lr_and_optim and self.args.use_hybrid_parallel:
             if self.dp_group.rank <= 0:
                 os.makedirs(output_dir, exist_ok=True)
                 logger.info("Saving optimizer files.")
@@ -2083,14 +2083,15 @@ class Trainer:
                     self.timers("save_paddle_optimizer").stop()
 
         if self.args.should_save:
-            if not self.args.use_hybrid_parallel:
-                logger.info("Saving optimizer files.")
-                self.timers("save_paddle_optimizer").start()
-                paddle.save(self.optimizer.state_dict(), os.path.join(output_dir, OPTIMIZER_NAME))
-                self.timers("save_paddle_optimizer").stop()
+            if not self.args.ignore_save_lr_and_optim:
+                if not self.args.use_hybrid_parallel:
+                    logger.info("Saving optimizer files.")
+                    self.timers("save_paddle_optimizer").start()
+                    paddle.save(self.optimizer.state_dict(), os.path.join(output_dir, OPTIMIZER_NAME))
+                    self.timers("save_paddle_optimizer").stop()
 
-            # FIXME: maybe only save one copy
-            paddle.save(self.lr_scheduler.state_dict(), os.path.join(output_dir, SCHEDULER_NAME))
+                # FIXME: maybe only save one copy
+                paddle.save(self.lr_scheduler.state_dict(), os.path.join(output_dir, SCHEDULER_NAME))
 
             if self.do_grad_scaling:
                 paddle.save(self.scaler.state_dict(), os.path.join(output_dir, SCALER_NAME))
