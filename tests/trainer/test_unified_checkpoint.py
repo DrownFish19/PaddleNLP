@@ -1083,7 +1083,7 @@ class TestUnifiedCheckpointOnN1C8SaveLoadSpeed(TestUnifiedCheckpointBase):
         super().setUp()
         for config_key in self.configs:
             self.configs[config_key]["unified_checkpoint"] = 1
-            self.configs[config_key]["unified_checkpoint_config"] = "enable_all_options"
+            self.configs[config_key]["unified_checkpoint_config"] = "skip_save_model_weight master_weight_compatible"
 
         self.need_allclose = False
         self.rtol = 1e-7
