@@ -346,14 +346,10 @@ def load_state_dict(
                     else:
                         weight = py_safe_slice_[:]
                     state_dict[key] = weight
-            logger.debug(f"Load safetensors checkpoint from {checkpoint_file}")
-            import time
 
-            start_time = time.time()
             for k in list(state_dict.keys()):
                 with device_guard():
                     state_dict[k] = paddle.Tensor(state_dict.pop(k), zero_copy=True)
-            logger.debug(f"Load safetensors checkpoint from {checkpoint_file} cost {time.time() - start_time}s")
 
             return state_dict
 

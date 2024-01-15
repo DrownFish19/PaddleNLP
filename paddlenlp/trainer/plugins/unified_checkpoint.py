@@ -28,7 +28,6 @@ from paddlenlp.trainer.trainer_utils import ExplicitEnum
 from paddlenlp.trainer.utils.helper import distributed_file, distributed_isfile
 from paddlenlp.transformers.model_utils import (
     PretrainedModel,
-    _load_state_dict_into_model,
     _load_state_dict_into_model_with_check,
     get_parameter_dtype,
     load_state_dict,
@@ -252,7 +251,7 @@ def load_unified_checkpoint_locally(args, model, resume_from_checkpoint: str, sa
         import time
 
         start_time = time.time()
-        error_msgs += _load_state_dict_into_model(model, state_dict, "")
+        error_msgs += _load_state_dict_into_model_with_check(model, state_dict, "")
         timers("_load_state_dict_into_model_with_check").stop()
         logger.debug(f"Loading {shard_file} into {model.__class__.__name__} takes {time.time() - start_time}s")
         # force memory release
