@@ -23,11 +23,13 @@ import paddle.distributed as dist
 from paddle.distributed import fleet
 from tqdm.auto import tqdm
 
+from paddlenlp.trainer.plugins.timer import get_timers
 from paddlenlp.trainer.trainer_utils import ExplicitEnum
 from paddlenlp.trainer.utils.helper import distributed_file, distributed_isfile
 from paddlenlp.transformers.model_utils import (
     PretrainedModel,
     _load_state_dict_into_model,
+    _load_state_dict_into_model_with_check,
     get_parameter_dtype,
     load_state_dict,
     unwrap_model,
@@ -216,6 +218,8 @@ def load_unified_checkpoint_locally(args, model, resume_from_checkpoint: str, sa
     if len(resolved_archive_file) > 1:
         resolved_archive_file = tqdm(resolved_archive_file, desc="Loading checkpoint shards")
 
+    timers = get_timers()
+
     for shard_file in resolved_archive_file:
         # TODO: check if  no expected_keys in shard_file, then don't load it
         if expected_keys.isdisjoint(sharded_metadata["file_map"][os.path.split(shard_file)[-1]]):
@@ -227,7 +231,9 @@ def load_unified_checkpoint_locally(args, model, resume_from_checkpoint: str, sa
             assert loaded_keys is not None, "loaded_keys is not None."
             tp_actions = model.get_tensor_parallel_convert_actions(model.config, loaded_keys, ignore_error=True)
         # Here we use expected_keys to optimize weights loading for pipeline model. Only works for safetensors
+        timers("load_state_dict").start()
         state_dict = load_state_dict(shard_file, tp_actions if pre_tensor_parallel_split else None, expected_keys)
+        timers("load_state_dict").stop()
 
         if not pre_tensor_parallel_split:
             # Since we load all keys but we only need one of pipeline stages
@@ -239,9 +245,16 @@ def load_unified_checkpoint_locally(args, model, resume_from_checkpoint: str, sa
             state_dict = model.convert_tensor_parallel(
                 None, model.config, state_dict=state_dict, ignore_error=len(resolved_archive_file) > 1
             )
+        logger.debug(f"Loading {shard_file} into {model.__class__.__name__}")
 
+        timers("_load_state_dict_into_model_with_check").start()
+
+        import time
+
+        start_time = time.time()
         error_msgs += _load_state_dict_into_model(model, state_dict, "")
-
+        timers("_load_state_dict_into_model_with_check").stop()
+        logger.debug(f"Loading {shard_file} into {model.__class__.__name__} takes {time.time() - start_time}s")
         # force memory release
         del state_dict
         gc.collect()
@@ -926,7 +939,7 @@ def load_unified_checkpoint_dynamically(args, model, optimizer, resume_from_chec
     )
     dist.barrier()
 
-    error_msgs = _load_state_dict_into_model(model, state_dict, "")
+    error_msgs = _load_state_dict_into_model_with_check(model, state_dict, "")
     if len(error_msgs) > 0:
         error_msg = "\n\t".join(error_msgs)
         raise RuntimeError(f"Error(s) in loading dynamic state_dict for {model.__class__.__name__}:\n\t{error_msg}")
