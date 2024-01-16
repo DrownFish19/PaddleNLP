@@ -242,16 +242,9 @@ def load_unified_checkpoint_locally(args, model, resume_from_checkpoint: str, sa
             state_dict = model.convert_tensor_parallel(
                 None, model.config, state_dict=state_dict, ignore_error=len(resolved_archive_file) > 1
             )
-        logger.debug(f"Loading {shard_file} into {model.__class__.__name__}")
-
         timers("unified_checkpoint_load_state_dict_into_model").start()
-
-        import time
-
-        start_time = time.time()
         unified_checkpoint_load_state_dict_into_model(model, state_dict, "")
         timers("unified_checkpoint_load_state_dict_into_model").stop()
-        logger.debug(f"Loading {shard_file} into {model.__class__.__name__} takes {time.time() - start_time}s")
         # force memory release
         del state_dict
         gc.collect()
