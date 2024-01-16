@@ -728,59 +728,11 @@ def _load_state_dict_into_model(model_to_load, state_dict, start_prefix):
     return error_msgs
 
 
-def _load_state_dict_into_model_with_check(model_to_load, state_dict, start_prefix):
-    # convert the dtype of state dict
-    def is_0d_or_1d(tensor):
-        return len(tensor.shape) == 0 or list(tensor.shape) == [1]
-
-    error_msgs = []
-
-    if len(start_prefix) > 0:
-        for key in list(state_dict.keys()):
-            if key.startswith(start_prefix):
-                state_dict[key.replace(start_prefix, "")] = state_dict.pop(key)
-
-    expected_place = paddle.framework._current_expected_place()
-    for key, value in model_to_load.state_dict().items():
-        if key in state_dict:
-            value_state_dict = state_dict.pop(key)
-            if isinstance(value_state_dict, np.ndarray):
-                raise ValueError(
-                    "convert_state_dict_dtype expected paddle.Tensor not numpy.ndarray, plase convert numpy.ndarray to paddle.Tensor"
-                )
-            # confirm parameter cast is executed on the same device as model
-            # TODO: cast(FP32 -> FP16) has diff on different devices, need to fix it
-            if value_state_dict.is_floating_point() and value_state_dict.dtype != value.dtype:
-                if value_state_dict.place._equal(expected_place):
-                    value_state_dict = paddle.cast(value_state_dict, value.dtype)
-                else:
-                    # confirm buffer cast is executed on the same device as model
-                    value_state_dict = paddle.cast(value_state_dict._copy_to(expected_place, False), value.dtype)
-                    # value_state_dict = value_state_dict._copy_to(value_state_dict.place, False)
-
-            # unified 0d and 1d tensor
-            if is_0d_or_1d(value) and is_0d_or_1d(value_state_dict):
-                if list(value.shape) != list(value_state_dict.shape):
-                    value_state_dict = paddle.reshape(value_state_dict, value.shape)
-
-            # TODO: add return status to state_dict
-            with warnings.catch_warnings(record=True) as w:
-                warnings.resetwarnings()
-                # paddlenlp hold  missing_keys , just ignore not found warnings.
-                warnings.filterwarnings("ignore", message=r".*is not found in the provided dict.*")
-                value.set_value(value_state_dict)
-                # del value_state_dict
-                error_msgs.extend([str(x.message) for x in w])
-
-            return error_msgs
-
-
 def _convert_state_dict_dtype_and_shape(state_dict, model_to_load):
     # convert the dtype of state dict
     def is_0d_or_1d(tensor):
         return len(tensor.shape) == 0 or list(tensor.shape) == [1]
 
-    expected_place = paddle.framework._current_expected_place()
     for key, value in model_to_load.state_dict().items():
         if key in state_dict:
             if isinstance(state_dict[key], np.ndarray):
@@ -790,12 +742,7 @@ def _convert_state_dict_dtype_and_shape(state_dict, model_to_load):
             # confirm parameter cast is executed on the same device as model
             # TODO: cast(FP32 -> FP16) has diff on different devices, need to fix it
             if state_dict[key].is_floating_point() and state_dict[key].dtype != value.dtype:
-                value_pop = state_dict.pop(key)
-                value_new_place = (
-                    value_pop if value_pop.place == expected_place else value_pop._copy_to(expected_place, False)
-                )
-                state_dict[key] = paddle.cast(value_new_place, value.dtype)._copy_to(value_pop.place, False)
-                del value_new_place
+                state_dict[key] = paddle.cast(state_dict.pop(key), value.dtype)
             # unified 0d and 1d tensor
             if is_0d_or_1d(value) and is_0d_or_1d(state_dict[key]):
                 if list(value.shape) != list(state_dict[key].shape):
