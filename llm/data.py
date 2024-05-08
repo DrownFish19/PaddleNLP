@@ -44,11 +44,12 @@ def get_convert_example(model):
 
     if base_model_prefix == "chatglm":
         return convert_example_chatglm
-    elif base_model_prefix in ["chatglm_v2", "llama", "bloom", "opt", "qwen", "mixtral", "gemma"]:
+    elif base_model_prefix in ["chatglm_v2", "llama", "bloom", "opt", "qwen", "mixtral", "gemma", "dbrx"]:
         return convert_example_common
     else:
         raise ValueError(
-            f"Unknown base_model_prefix: {model.base_model_prefix}. Supported base_model_prefix list: chatglm, bloom, llama, qwen, mixtral, gemma"
+            f"Unknown base_model_prefix: {model.base_model_prefix}. Supported base_model_prefix list: chatglm, bloom, llama, qwen, mixtral, gemma",
+            "dbrx",
         )
 
 
@@ -136,7 +137,6 @@ def tokenize_rounds_example(tokenizer, example, data_args, **kwargs):
 
         # break when the length of current conversations is greater than max_length
         if len(input_ids) + len(user_input_ids) + len(bot_input_ids) > max_length:
-
             # when the length of last conversation is lager than max_length, we should not break: at least one round
             if index < len(conversations_ids) - 1:
                 break
