@@ -165,7 +165,7 @@ class DbrxConfig(PretrainedConfig):
         attention_probs_dropout_prob=0.0,
         num_local_experts=16,
         num_experts_per_tok=4,
-        moe_jitter_eps=0,
+        moe_jitter_eps=None,
         router_aux_loss_coef=0.05,
         moe_normalize_expert_weights=1.0,
         clip_qkv=8,

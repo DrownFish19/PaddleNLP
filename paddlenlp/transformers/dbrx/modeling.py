@@ -111,11 +111,11 @@ def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
     x2 = x[..., x.shape[-1] // 2 :]
-    return paddle.cat((-x2, x1), dim=-1)
+    return paddle.concat([-x2, x1], axis=-1)
 
 
 # Copied from transformers.models.llama.modeling_llama.apply_rotary_pos_emb
-def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
+def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None):
     """Applies Rotary Position Embedding to the query and key tensors.
 
     Args:
@@ -135,8 +135,15 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids=None, unsqueeze_dim=1):
     Returns:
         `tuple(paddle.Tensor)` comprising of the query and key tensors rotated using the Rotary Position Embedding.
     """
-    cos = cos.unsqueeze(unsqueeze_dim)
-    sin = sin.unsqueeze(unsqueeze_dim)
+    if position_ids is None:
+        # Note: Only for MixtralForCausalLMPipe model pretraining
+        cos = cos[:, : q.shape[1], :, :]  # [bs, seq_len, 1, dim]
+        sin = sin[:, : q.shape[1], :, :]  # [bs, seq_len, 1, dim]
+    else:
+        cos = cos.squeeze(axis=[0, 2])  # [seq_len, dim]
+        sin = sin.squeeze(axis=[0, 2])  # [seq_len, dim]
+        cos = cos[position_ids].unsqueeze(2)  # [bs, seq_len, 1, dim]
+        sin = sin[position_ids].unsqueeze(2)  # [bs, seq_len, 1, dim]
     q_embed = (q * cos) + (rotate_half(q) * sin)
     k_embed = (k * cos) + (rotate_half(k) * sin)
     return q_embed, k_embed
@@ -148,11 +155,12 @@ def repeat_kv(hidden_states: paddle.Tensor, n_rep: int) -> paddle.Tensor:
     This is the equivalent of paddle.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states go from (batch,
     num_key_value_heads, seqlen, head_dim) to (batch, num_attention_heads, seqlen, head_dim)
     """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    batch, slen, num_key_value_heads, head_dim = hidden_states.shape
     if n_rep == 1:
         return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads, n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
+
+    hidden_states = hidden_states.unsqueeze(-2).tile([1, 1, 1, n_rep, 1])
+    return hidden_states.reshape([batch, slen, num_key_value_heads * n_rep, head_dim])
 
 
 def load_balancing_loss_func(gate_logits, num_experts, top_k=2, attention_mask=None):
@@ -183,9 +191,9 @@ def load_balancing_loss_func(gate_logits, num_experts, top_k=2, attention_mask=N
         # [num_hidden_layers X batch_size X sequence_length, num_experts]
         concatenated_gate_logits = paddle.concat(gate_logits, axis=0)
 
-    routing_weights = F.softmax(concatenated_gate_logits, dim=-1)
+    routing_weights = F.softmax(concatenated_gate_logits, axis=-1)
 
-    _, selected_experts = paddle.topk(routing_weights, top_k, dim=-1)
+    _, selected_experts = paddle.topk(routing_weights, top_k, axis=-1)
 
     # [num_hidden_layers X batch_size X sequence_length, top_k, num_experts]
     expert_mask = paddle.nn.functional.one_hot(selected_experts, num_experts)
@@ -336,7 +344,7 @@ def scaled_dot_product_attention(
                 value_states,
                 attn_mask=attention_mask,
                 is_causal=attention_mask is None,
-                dropout_p=config.attention_dropout if training else 0.0,
+                dropout_p=config.attention_probs_dropout_prob if training else 0.0,
                 training=training,
             )
             attn_weights = None
@@ -377,7 +385,7 @@ def scaled_dot_product_attention(
             with paddle.amp.auto_cast(False):
                 attn_weights = F.softmax(attn_weights, axis=-1, dtype="float32").astype(query_states.dtype)
 
-        attn_weights = F.dropout(attn_weights, p=config.attention_dropout, training=training)
+        attn_weights = F.dropout(attn_weights, p=config.attention_probs_dropout_prob, training=training)
 
         attn_output = paddle.matmul(attn_weights, value_states)
         attn_output = attn_output.transpose([0, 2, 1, 3])
@@ -433,10 +441,10 @@ def _expand_2d_mask(mask, dtype, tgt_length):
 
 # Copied from transformers.models.llama.modeling_llama._get_unpad_data
 def _get_unpad_data(attention_mask):
-    seqlens_in_batch = attention_mask.sum(dim=-1, dtype=paddle.int32)
+    seqlens_in_batch = attention_mask.sum(axis=-1, dtype=paddle.int32)
     indices = paddle.nonzero(attention_mask.flatten(), as_tuple=False).flatten()
     max_seqlen_in_batch = seqlens_in_batch.max().item()
-    cu_seqlens = F.pad(paddle.cumsum(seqlens_in_batch, dim=0, dtype=paddle.int32), (1, 0))
+    cu_seqlens = F.pad(paddle.cumsum(seqlens_in_batch, axis=0, dtype=paddle.int32), (1, 0))
     return (
         indices,
         cu_seqlens,
@@ -509,7 +517,7 @@ class DbrxAttention(nn.Layer):
             )
         else:
             self.Wqkv = nn.Linear(
-                self.hidden_size, self.hidden_size + 2 * self.num_key_value_heads * self.head_dim, bias=False
+                self.hidden_size, self.hidden_size + 2 * self.num_key_value_heads * self.head_dim, bias_attr=False
             )
 
         if config.tensor_parallel_degree > 1:
@@ -520,7 +528,7 @@ class DbrxAttention(nn.Layer):
                 input_is_parallel=True,
             )
         else:
-            self.out_proj = nn.Linear(self.hidden_size, self.hidden_size, bias=False)
+            self.out_proj = nn.Linear(self.hidden_size, self.hidden_size, bias_attr=False)
 
         self.rotary_emb = DbrxRotaryEmbedding(
             self.head_dim,
@@ -537,12 +545,12 @@ class DbrxAttention(nn.Layer):
         output_attentions: bool = False,
         use_cache: bool = False,
     ) -> Tuple[paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]]:
-        bsz, q_len, _ = hidden_states.size()
+        bsz, q_len, _ = hidden_states.shape
 
         qkv_states = self.Wqkv(hidden_states)
         min_val = -self.clip_qkv if self.clip_qkv is not None else None
         max_val = self.clip_qkv
-        qkv_states = qkv_states.clamp(min=min_val, max=max_val)
+        qkv_states = qkv_states.clip(min=min_val, max=max_val)
 
         query_states, key_states, value_states = qkv_states.split(
             [
@@ -550,7 +558,7 @@ class DbrxAttention(nn.Layer):
                 self.num_key_value_heads * self.head_dim,
                 self.num_key_value_heads * self.head_dim,
             ],
-            dim=2,
+            axis=2,
         )
 
         if self.sequence_parallel:
@@ -559,6 +567,7 @@ class DbrxAttention(nn.Layer):
         else:
             target_query_shape = [0, 0, self.num_heads, self.head_dim]
             target_key_value_shape = [0, 0, self.num_key_value_heads, self.head_dim]
+
         query_states = query_states.reshape(shape=target_query_shape)
         key_states = key_states.reshape(shape=target_key_value_shape)
         value_states = value_states.reshape(shape=target_key_value_shape)
@@ -631,7 +640,7 @@ class DbrxAttention(nn.Layer):
 
         # if sequence_parallel is true, out shape are [q_len / n, bs, num_head * head_dim]
         # else their shape are [bs, q_len, num_head * head_dim], n is mp parallelism.
-        attn_output = self.o_proj(attn_output)
+        attn_output = self.out_proj(attn_output)
 
         if not output_attentions:
             attn_weights = None
@@ -654,9 +663,9 @@ class DbrxNormAttentionNorm(nn.Layer):
     def __init__(self, config: DbrxConfig, layerwise_recompute: bool = False):
         super().__init__()
         self.resid_pdrop = config.resid_pdrop
-        self.norm_1 = nn.LayerNorm(config.hidden_size, bias=False)
+        self.norm_1 = nn.LayerNorm(config.hidden_size, bias_attr=False)
         self.attn = DbrxAttention(config, layerwise_recompute)
-        self.norm_2 = nn.LayerNorm(config.hidden_size, bias=False)
+        self.norm_2 = nn.LayerNorm(config.hidden_size, bias_attr=False)
 
     def forward(
         self,
@@ -666,28 +675,48 @@ class DbrxNormAttentionNorm(nn.Layer):
         past_key_value: Optional[Tuple[paddle.Tensor]] = None,
         output_attentions: bool = False,
         use_cache: bool = False,
-        cache_position: Optional[paddle.LongTensor] = None,
     ) -> Tuple[paddle.Tensor, paddle.Tensor, Optional[paddle.Tensor], Optional[Tuple[paddle.Tensor]]]:
         residual_states = hidden_states
-        hidden_states = self.norm_1(hidden_states).to(hidden_states.dtype)
+        hidden_states = self.norm_1(hidden_states)
 
-        hidden_states, attn_weights, past_key_value = self.attn(
+        outputs = self.attn(
             hidden_states=hidden_states,
             attention_mask=attention_mask,
             position_ids=position_ids,
             past_key_value=past_key_value,
             output_attentions=output_attentions,
             use_cache=use_cache,
-            cache_position=cache_position,
         )
+
+        if type(outputs) is tuple:
+            hidden_states = outputs[0]
+        else:
+            hidden_states = outputs
+
+        if output_attentions:
+            attn_weights = outputs[1]
+
+        if use_cache:
+            past_key_value = outputs[2 if output_attentions else 1]
 
         hidden_states = nn.functional.dropout(hidden_states, p=self.resid_pdrop, training=self.training)
         hidden_states = hidden_states + residual_states
 
         residual_states = hidden_states
-        hidden_states = self.norm_2(hidden_states).to(hidden_states.dtype)
+        hidden_states = self.norm_2(hidden_states)
 
-        return residual_states, hidden_states, attn_weights, past_key_value
+        outputs = (hidden_states,)
+
+        if output_attentions:
+            outputs += (attn_weights,)
+
+        if use_cache:
+            outputs += (past_key_value,)
+
+        if type(outputs) is tuple and len(outputs) == 1:
+            outputs = outputs[0]
+
+        return outputs
 
 
 class DbrxRouter(nn.Layer):
@@ -699,13 +728,11 @@ class DbrxRouter(nn.Layer):
         self.moe_jitter_eps = config.moe_jitter_eps
         self.moe_normalize_expert_weights = config.moe_normalize_expert_weights
 
-        self.layer = nn.Linear(self.hidden_size, self.num_local_experts, bias=False)
+        self.layer = nn.Linear(self.hidden_size, self.num_local_experts, bias_attr=False)
 
     def forward(self, hidden_states: paddle.Tensor) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.LongTensor]:
         if self.training and self.moe_jitter_eps is not None:
-            hidden_states *= paddle.empty_like(hidden_states).uniform_(
-                1.0 - self.moe_jitter_eps, 1.0 + self.moe_jitter_eps
-            )
+            hidden_states *= paddle.zeros_like(hidden_states).uniform_(min=1.0 - self.moe_jitter_eps, max=1.0 + self.moe_jitter_eps)
         batch_size, seq_len, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.reshape([-1, hidden_dim])
         # router_logits: [batch_size * seq_len, num_experts]
@@ -713,9 +740,9 @@ class DbrxRouter(nn.Layer):
         with paddle.amp.auto_cast(False):
             weights = F.softmax(router_logits.astype("float32"), axis=1)
 
-        top_weights, top_experts = paddle.topk(weights, self.num_experts_per_tok, dim=-1)
+        top_weights, top_experts = paddle.topk(weights, self.num_experts_per_tok, axis=-1)
         top_weights_scale = (
-            paddle.norm(top_weights, p=self.moe_normalize_expert_weights, dim=-1, keepdim=True)
+            paddle.norm(top_weights, p=self.moe_normalize_expert_weights, axis=-1, keepdim=True)
             if self.moe_normalize_expert_weights is not None
             else 1.0
         )
@@ -733,9 +760,18 @@ class DbrxExpertGLU(nn.Layer):
         self.intermediate_size = config.intermediate_size
         self.num_local_experts = config.num_local_experts
 
-        self.w1 = nn.Parameter(paddle.empty(self.num_local_experts * self.intermediate_size, self.hidden_size))
-        self.v1 = nn.Parameter(paddle.empty(self.num_local_experts * self.intermediate_size, self.hidden_size))
-        self.w2 = nn.Parameter(paddle.empty(self.num_local_experts * self.intermediate_size, self.hidden_size))
+        self.w1 = self.create_parameter(
+            shape=[self.num_local_experts * self.intermediate_size, self.hidden_size],
+            dtype=paddle.get_default_dtype(),
+        )
+        self.v1 = self.create_parameter(
+            shape=[self.num_local_experts * self.intermediate_size, self.hidden_size],
+            dtype=paddle.get_default_dtype(),
+        )
+        self.w2 = self.create_parameter(
+            shape=[self.num_local_experts * self.intermediate_size, self.hidden_size],
+            dtype=paddle.get_default_dtype(),
+        )
 
         self.activation_fn = ACT2FN[config.hidden_act]
 
@@ -762,7 +798,11 @@ class DbrxExperts(nn.Layer):
     ) -> paddle.Tensor:
         bsz, q_len, hidden_size = x.shape
         x = x.reshape([-1, hidden_size])
-        out = paddle.zeros_like(x)
+        
+        final_hidden_states = paddle.zeros(
+            [bsz * q_len, hidden_size],
+            dtype=x.dtype,
+        )
 
         expert_mask = nn.functional.one_hot(top_experts, num_classes=self.num_local_experts).transpose([2, 1, 0])
         # Chunk experts at once to avoid storing full parameter multiple times in autograd
@@ -781,22 +821,26 @@ class DbrxExperts(nn.Layer):
         w2_chunked = [w2.squeeze(axis=0) for w2 in w2_chunked]
 
         for expert_idx in range(0, self.num_local_experts):
-            topk_idx, token_idx = paddle.where(expert_mask[expert_idx])
-            if token_idx.shape[0] == 0:
+            idx, top_x = paddle.where(expert_mask[expert_idx])
+
+            if top_x.shape[0] == 0:
                 continue
 
-            token_list = token_idx
-            topk_list = topk_idx
+            expert_tokens = paddle.gather(x, top_x.squeeze())
 
-            expert_tokens = x[None, token_list].reshape(-1, hidden_size)
             expert_out = (
                 self.mlp(expert_tokens, w1_chunked[expert_idx], v1_chunked[expert_idx], w2_chunked[expert_idx])
-                * top_weights[token_list, topk_list, None]
+                * top_weights[top_x, idx]
             )
-            paddle.index_add_(out, token_idx, 0, expert_out.astype(expert_out.dtype))
 
-        out = out.reshape(bsz, q_len, hidden_size)
-        return out
+            top_x = top_x.squeeze()
+            if top_x.shape == []:
+                top_x = paddle.to_tensor([top_x.item()])
+
+            final_hidden_states.index_add_(top_x, 0, expert_out.astype(expert_out.dtype))
+
+        final_hidden_states = final_hidden_states.reshape([bsz, q_len, hidden_size])
+        return final_hidden_states
 
 
 class DbrxFFN(nn.Layer):
@@ -812,14 +856,21 @@ class DbrxFFN(nn.Layer):
 
 
 class DbrxBlock(nn.Layer):
-    def __init__(self, config: DbrxConfig, block_idx: int):
+    def __init__(self, config: DbrxConfig, layerwise_recompute: int):
         super().__init__()
         self.config = config
         self.hidden_size = config.hidden_size
         self.resid_pdrop = config.resid_pdrop
-        self.block_idx = block_idx
-        self.norm_attn_norm = DbrxNormAttentionNorm(config=config, block_idx=block_idx)
+        self.norm_attn_norm = DbrxNormAttentionNorm(config, layerwise_recompute)
         self.ffn = DbrxFFN(config=config)
+
+        self.sequence_parallel = config.sequence_parallel
+        # Note that we will actually perform a recompute only if both enable_recompute and layerwise_recompute are set to True
+        # Enable_recompute defaults to False and is controlled by Trainer
+        self.enable_recompute = False
+        self.layerwise_recompute = layerwise_recompute
+        self.recompute_granularity = config.recompute_granularity
+
 
     def forward(
         self,
@@ -847,7 +898,7 @@ class DbrxBlock(nn.Layer):
                 returned and can be used to speed up decoding (see `past_key_values`).
             cache_position (`paddle.LongTensor`, optional): position ids of the cache
         """
-
+        residual = hidden_states
         # Norm + Attention + Norm
         has_gradient = not hidden_states.stop_gradient
         if (
@@ -890,7 +941,7 @@ class DbrxBlock(nn.Layer):
         # Fully Connected
         hidden_states, router_logits = self.ffn(hidden_states)
         hidden_states = nn.functional.dropout(hidden_states, p=self.resid_pdrop, training=self.training)
-        hidden_states = resid_states + hidden_states
+        hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
 
@@ -918,36 +969,23 @@ class DbrxPretrainedModel(PretrainedModel):
     def _get_name_mappings(cls, config: DbrxConfig) -> list[StateDictNameMapping]:
         mappings: list[StateDictNameMapping] = []
         model_mappings = [
-            ["embed_tokens.weight"],
-            ["norm.weight"],
+            ["wte.weight"],
+            ["wte.weight"],
         ]
         for layer_index in range(config.num_hidden_layers):
             layer_mappings = [
-                [f"layers.{layer_index}.self_attn.q_proj.weight", None, "transpose"],
-                [f"layers.{layer_index}.self_attn.k_proj.weight", None, "transpose"],
-                [f"layers.{layer_index}.self_attn.v_proj.weight", None, "transpose"],
-                [f"layers.{layer_index}.self_attn.o_proj.weight", None, "transpose"],
-                [f"layers.{layer_index}.self_attn.rotary_emb.inv_freq"],
-                [f"layers.{layer_index}.input_layernorm.weight"],
-                [f"layers.{layer_index}.post_attention_layernorm.weight"],
+                [f"blocks.{layer_index}.norm_attn_norm.attn.Wqkv.weight", None, "transpose"],
+                [f"layers.{layer_index}.norm_attn_norm.attn.out_proj.weight", None, "transpose"],
+                [f"layers.{layer_index}.ffn.router.layer.weight", None, "transpose"]
             ]
             model_mappings.extend(layer_mappings)
 
-            for expert_idx in range(config.num_local_experts):
-                expert_mappings = [
-                    [f"layers.{layer_index}.block_sparse_moe.experts.{expert_idx}.w1.weight", None, "transpose"],
-                    [f"layers.{layer_index}.block_sparse_moe.experts.{expert_idx}.w2.weight", None, "transpose"],
-                    [f"layers.{layer_index}.block_sparse_moe.experts.{expert_idx}.w3.weight", None, "transpose"],
-                ]
-                model_mappings.extend(expert_mappings)
-            model_mappings.append([f"layers.{layer_index}.block_sparse_moe.gate.weight", None, "transpose"])
-
         init_name_mappings(mappings=model_mappings)
         # base-model prefix "MixtralModel"
-        if "MixtralModel" not in config.architectures:
+        if "DbrxModel" not in config.architectures:
             for mapping in model_mappings:
                 mapping[0] = "transformer." + mapping[0]
-                mapping[1] = "mixtral." + mapping[1]
+                mapping[1] = "dbrx." + mapping[1]
             model_mappings.append(["lm_head.weight", "lm_head.weight", "transpose"])
 
         mappings = [StateDictNameMapping(*mapping, index=index) for index, mapping in enumerate(model_mappings)]
@@ -1010,24 +1048,111 @@ class DbrxPretrainedModel(PretrainedModel):
 
         return mappings
 
-    def _init_weights(self, module):
-        std = self.config.initializer_range
-        if isinstance(module, nn.Linear):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, nn.Embedding):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.padding_idx is not None:
-                module.weight.data[module.padding_idx].zero_()
-        elif isinstance(module, nn.LayerNorm):
-            module.weight.data.normal_(mean=0.0, std=std)
-            if module.bias is not None:
-                module.bias.data.zero_()
-        elif isinstance(module, DbrxExpertGLU):
-            module.w1.data.normal_(mean=0.0, std=std)
-            module.v1.data.normal_(mean=0.0, std=std)
-            module.w2.data.normal_(mean=0.0, std=std)
+    def _init_weights(self, layer):
+        # std = self.config.initializer_range
+        """Initialization hook"""
+        if self.config.tensor_parallel_degree > 1:
+            rng_tracker = get_rng_state_tracker().rng_state
+        if isinstance(
+            layer,
+            (
+                nn.Linear,
+                nn.Embedding,
+                mpu.VocabParallelEmbedding,
+                mpu.ColumnParallelLinear,
+                mpu.RowParallelLinear,
+                DbrxLMHead,
+                ColumnSequenceParallelLinear,
+                RowSequenceParallelLinear,
+                nn.LayerNorm,  # note this
+            ),
+        ):
+            # In the dygraph mode, use the `set_value` to reset the parameter directly,
+            # and reset the `state_dict` to update parameter in static mode.
+            if isinstance(layer.weight, paddle.Tensor):
+                if layer.weight.is_distributed:
+                    with rng_tracker():
+                        layer.weight.set_value(
+                            paddle.tensor.normal(
+                                mean=0.0,
+                                std=self.config.initializer_range
+                                if hasattr(self.config, "initializer_range")
+                                else self.mixtral.config.initializer_range,
+                                shape=layer.weight.shape,
+                            )
+                        )
+                else:
+                    layer.weight.set_value(
+                        paddle.tensor.normal(
+                            mean=0.0,
+                            std=self.config.initializer_range
+                            if hasattr(self.config, "initializer_range")
+                            else self.mixtral.config.initializer_range,
+                            shape=layer.weight.shape,
+                        )
+                    )
+
+                if getattr(layer, "bias", None) is not None:
+                    layer.bias.set_value(paddle.zeros_like(layer.bias))
+
+        if isinstance(layer, (DbrxExpertGLU)):
+            if layer.w1.is_distributed:
+                with rng_tracker():
+                    layer.w1.set_value(
+                        paddle.tensor.normal(
+                            mean=0.0,
+                            std=self.config.initializer_range
+                            if hasattr(self.config, "initializer_range")
+                            else self.mixtral.config.initializer_range,
+                            shape=layer.w1.shape,
+                        )
+                    )
+                    layer.v1.set_value(
+                        paddle.tensor.normal(
+                            mean=0.0,
+                            std=self.config.initializer_range
+                            if hasattr(self.config, "initializer_range")
+                            else self.mixtral.config.initializer_range,
+                            shape=layer.v1.shape,
+                        )
+                    )
+                    layer.w2.set_value(
+                        paddle.tensor.normal(
+                            mean=0.0,
+                            std=self.config.initializer_range
+                            if hasattr(self.config, "initializer_range")
+                            else self.mixtral.config.initializer_range,
+                            shape=layer.w2.shape,
+                        )
+                    )
+            else:
+                layer.w1.set_value(
+                    paddle.tensor.normal(
+                        mean=0.0,
+                        std=self.config.initializer_range
+                        if hasattr(self.config, "initializer_range")
+                        else self.mixtral.config.initializer_range,
+                        shape=layer.w1.shape,
+                    )
+                )
+                layer.v1.set_value(
+                    paddle.tensor.normal(
+                        mean=0.0,
+                        std=self.config.initializer_range
+                        if hasattr(self.config, "initializer_range")
+                        else self.mixtral.config.initializer_range,
+                        shape=layer.v1.shape,
+                    )
+                )
+                layer.w2.set_value(
+                    paddle.tensor.normal(
+                        mean=0.0,
+                        std=self.config.initializer_range
+                        if hasattr(self.config, "initializer_range")
+                        else self.mixtral.config.initializer_range,
+                        shape=layer.w2.shape,
+                    )
+                )
 
 
 class DbrxModel(DbrxPretrainedModel):
@@ -1065,8 +1190,10 @@ class DbrxModel(DbrxPretrainedModel):
                 self.padding_idx,
             )
 
-        self.blocks = nn.LayerList([DbrxBlock(config, block_idx) for block_idx in range(config.num_hidden_layers)])
-        self.norm_f = nn.LayerNorm(config.hidden_size, bias=False)
+        self.blocks = nn.LayerList(
+            [DbrxBlock(config, i not in self.no_recompute_layers) for i in range(config.num_hidden_layers)]
+        )
+        self.norm_f = nn.LayerNorm(config.hidden_size, bias_attr=False)
 
     def get_input_embeddings(self) -> nn.Embedding:
         return self.wte
@@ -1170,7 +1297,7 @@ class DbrxModel(DbrxPretrainedModel):
             raise ValueError("You have to specify either decoder_input_ids or decoder_inputs_embeds")
 
         if past_key_values is None:
-            past_key_values = tuple([None] * len(self.layers))
+            past_key_values = tuple([None] * len(self.blocks))
         # NOTE: to make cache can be clear in-time
         past_key_values = list(past_key_values)
 
@@ -1200,7 +1327,7 @@ class DbrxModel(DbrxPretrainedModel):
             if is_casual:
                 attention_mask = None
 
-        causal_mask = self._update_causal_mask(attention_mask, inputs_embeds, cache_position)
+        # causal_mask = self._update_causal_mask(attention_mask, inputs_embeds, cache_position)
 
         # embed positions
         hidden_states = inputs_embeds
@@ -1211,7 +1338,7 @@ class DbrxModel(DbrxPretrainedModel):
         all_router_logits = () if output_router_logits else None
         next_decoder_cache = None
 
-        for idx, block in enumerate(self.blocks):
+        for idx, layer in enumerate(self.blocks):
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
             past_key_value = past_key_values[idx] if past_key_values is not None else None
@@ -1224,7 +1351,7 @@ class DbrxModel(DbrxPretrainedModel):
                 and self.recompute_granularity == "full"
             ):
                 block_outputs = self.recompute_training_full(
-                    block,
+                    layer,
                     hidden_states,
                     position_ids,
                     attention_mask,
@@ -1234,7 +1361,7 @@ class DbrxModel(DbrxPretrainedModel):
                     use_cache,
                 )
             else:
-                block_outputs = block(
+                block_outputs = layer(
                     hidden_states,
                     position_ids,
                     attention_mask,
@@ -1260,7 +1387,7 @@ class DbrxModel(DbrxPretrainedModel):
             if output_router_logits:
                 all_router_logits += (block_outputs[-1],)
 
-        hidden_states = self.norm(hidden_states)
+        hidden_states = self.norm_f(hidden_states)
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -1289,7 +1416,6 @@ class DbrxPretrainingCriterion(nn.Layer):
     """
 
     def __init__(self, config):
-
         super(DbrxPretrainingCriterion, self).__init__()
         self.ignore_index = getattr(config, "ignore_index", -100)
         self.config = config
@@ -1352,23 +1478,20 @@ class DbrxLMHead(nn.Layer):
 class DbrxForCausalLM(DbrxPretrainedModel):
     def __init__(self, config: DbrxConfig):
         super().__init__(config)
-        self.transformer = DbrxModel(config)
+        self.dbrx = DbrxModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = DbrxLMHead(config)
         self.criterion = DbrxPretrainingCriterion(config)
 
-        self.moe_loss_weight = config.ffn_config.moe_loss_weight
-        self.num_experts = config.ffn_config.moe_num_experts
-        self.num_experts_per_tok = config.ffn_config.moe_top_k
-
-        # Initialize weights and apply final processing
-        self.post_init()
+        self.moe_loss_weight = config.router_aux_loss_coef
+        self.num_experts = config.num_local_experts
+        self.num_experts_per_tok = config.num_experts_per_tok
 
     def get_input_embeddings(self) -> nn.Embedding:
-        return self.transformer.get_input_embeddings()
+        return self.dbrx.get_input_embeddings()
 
     def set_input_embeddings(self, value: nn.Embedding):
-        self.transformer.set_input_embeddings(value)
+        self.dbrx.set_input_embeddings(value)
 
     def get_output_embeddings(self) -> nn.Linear:
         return self.lm_head
@@ -1377,10 +1500,10 @@ class DbrxForCausalLM(DbrxPretrainedModel):
         self.lm_head = new_embeddings
 
     def set_decoder(self, decoder: DbrxModel):
-        self.transformer = decoder
+        self.dbrx = decoder
 
     def get_decoder(self) -> DbrxModel:
-        return self.transformer
+        return self.dbrx
 
     def forward(
         self,
@@ -1433,7 +1556,7 @@ class DbrxForCausalLM(DbrxPretrainedModel):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
-        outputs = self.transformer(
+        outputs = self.dbrx(
             input_ids=input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
