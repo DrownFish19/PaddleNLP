@@ -732,7 +732,9 @@ class DbrxRouter(nn.Layer):
 
     def forward(self, hidden_states: paddle.Tensor) -> Tuple[paddle.Tensor, paddle.Tensor, paddle.LongTensor]:
         if self.training and self.moe_jitter_eps is not None:
-            hidden_states *= paddle.zeros_like(hidden_states).uniform_(min=1.0 - self.moe_jitter_eps, max=1.0 + self.moe_jitter_eps)
+            hidden_states *= paddle.zeros_like(hidden_states).uniform_(
+                min=1.0 - self.moe_jitter_eps, max=1.0 + self.moe_jitter_eps
+            )
         batch_size, seq_len, hidden_dim = hidden_states.shape
         hidden_states = hidden_states.reshape([-1, hidden_dim])
         # router_logits: [batch_size * seq_len, num_experts]
@@ -798,7 +800,7 @@ class DbrxExperts(nn.Layer):
     ) -> paddle.Tensor:
         bsz, q_len, hidden_size = x.shape
         x = x.reshape([-1, hidden_size])
-        
+
         final_hidden_states = paddle.zeros(
             [bsz * q_len, hidden_size],
             dtype=x.dtype,
@@ -870,7 +872,6 @@ class DbrxBlock(nn.Layer):
         self.enable_recompute = False
         self.layerwise_recompute = layerwise_recompute
         self.recompute_granularity = config.recompute_granularity
-
 
     def forward(
         self,
@@ -976,7 +977,7 @@ class DbrxPretrainedModel(PretrainedModel):
             layer_mappings = [
                 [f"blocks.{layer_index}.norm_attn_norm.attn.Wqkv.weight", None, "transpose"],
                 [f"layers.{layer_index}.norm_attn_norm.attn.out_proj.weight", None, "transpose"],
-                [f"layers.{layer_index}.ffn.router.layer.weight", None, "transpose"]
+                [f"layers.{layer_index}.ffn.router.layer.weight", None, "transpose"],
             ]
             model_mappings.extend(layer_mappings)
 
