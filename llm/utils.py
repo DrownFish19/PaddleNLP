@@ -159,6 +159,14 @@ def get_lora_target_modules(model):
             ".*w2.*",
             ".*w3.*",
         ]
+    elif model.base_model_prefix == "dbrx":
+        target_modules = [
+            ".*Wqkv.*",
+            ".*out_proj.*",
+            ".*V1.*",
+            ".*w1.*",
+            ".*w2.*",
+        ]
     else:
         raise ValueError(f"Unknown base_model_prefix: {model.base_model_prefix}.")
     return target_modules
