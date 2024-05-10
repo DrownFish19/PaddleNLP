@@ -38,8 +38,6 @@ try:
         ColumnSequenceParallelLinear,
         GatherOp,
         RowSequenceParallelLinear,
-        ScatterOp,
-        mark_as_sequence_parallel_parameter,
     )
 except:
     pass
@@ -53,7 +51,6 @@ from paddlenlp.transformers.model_outputs import (
     MoEModelOutputWithPast,
 )
 from paddlenlp.transformers.model_utils import PretrainedModel, register_base_model
-from paddlenlp.utils.log import logger
 
 from ..activations import ACT2FN
 from .configuration import DbrxConfig
@@ -1156,13 +1153,14 @@ class DbrxPretrainedModel(PretrainedModel):
                 )
 
 
+@register_base_model
 class DbrxModel(DbrxPretrainedModel):
     """Transformer decoder consisting of *config.num_hidden_layers*. Each layer is a [`DbrxBlock`] layer.
 
     Args:
         config ([`DbrxConfig`]): Model configuration class with all parameters of the model.
             Initializing with a config file does not load the weights associated with the model, only the
-            configuration. Check out the [`~PreTrainedModel.from_pretrained`] method to load the model weights.
+            configuration. Check out the [`~PretrainedModel.from_pretrained`] method to load the model weights.
     """
 
     def __init__(self, config: DbrxConfig):
