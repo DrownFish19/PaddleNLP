@@ -103,18 +103,7 @@ TOKENIZER_MAPPING_NAMES = OrderedDict(
 
 FAST_TOKENIZER_MAPPING_NAMES = OrderedDict(
     [
-        ("BertTokenizerFast", "bert"),
-        ("ErnieTokenizerFast", "ernie"),
-        ("TinyBertTokenizerFast", "tinybert"),
-        ("ErnieMTokenizerFast", "ernie_m"),
-        ("NystromformerTokenizerFast", "nystromformer"),
-        ("DistilBertTokenizerFast", "distilbert"),
-        ("AlbertEnglishTokenizerFast", "albert"),
-        ("RobertaBPETokenizerFast", "roberta"),
         ("LlamaTokenizerFast", "llama"),
-        ("QWenTokenizerFast", "qwen"),
-        ("ChatGLMv2TokenizerFast", "chatglm_v2"),
-        ("GemmaTokenizerFast", "gemma"),
     ]
 )
 # For TokenizerFast
