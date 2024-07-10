@@ -300,12 +300,8 @@ from .qwen2 import *
 from .qwen2_moe import *
 
 # For faster tokenizer
-from ..utils.import_utils import is_fast_tokenizer_available
+from ..utils.import_utils import is_tokenizers_available
 
-if is_fast_tokenizer_available():
+if is_tokenizers_available():
     from .tokenizer_utils_fast import PretrainedTokenizerFast
-    from .bert.fast_tokenizer import *
-    from .ernie.fast_tokenizer import *
-    from .tinybert.fast_tokenizer import *
-    from .ernie_m.fast_tokenizer import *
-    from .nystromformer.fast_tokenizer import *
+    from .llama.tokenizer_fast import *

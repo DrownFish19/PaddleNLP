@@ -65,7 +65,7 @@ def is_torch_available() -> bool:
 
 
 def is_package_available(package_name: str) -> bool:
-    """check if the package is avaliable
+    """check if the package is available
     Args:
         package_name (str): the installed package name
     Returns:
@@ -75,18 +75,18 @@ def is_package_available(package_name: str) -> bool:
     return package_spec is not None and package_spec.has_location
 
 
-def is_fast_tokenizer_available() -> bool:
-    """check if `tokenizers` ia avaliable
+def is_tokenizers_available() -> bool:
+    """check if `tokenizers` ia available
     Returns:
-        bool: if `tokenizers` is avaliable
+        bool: if `tokenizers` is available
     """
     return is_package_available("tokenizers")
 
 
 def is_paddlenlp_ops_available() -> bool:
-    """check if `paddlenlp_ops` ia avaliable
+    """check if `paddlenlp_ops` ia available
     Returns:
-        bool: if `paddlenlp_ops` is avaliable
+        bool: if `paddlenlp_ops` is available
     """
     return is_package_available("paddlenlp_ops")
 
@@ -143,7 +143,7 @@ def install_package(
 
 
 def uninstall_package(package_name: str, module_name: Optional[str] = None):
-    """uninstall the pacakge from site-packages.
+    """uninstall the package from site-packages.
 
     To remove the cache of source package module & class & method, it should:
         1. remove the source files of packages under the `site-packages` dir.
@@ -175,7 +175,7 @@ def uninstall_package(package_name: str, module_name: Optional[str] = None):
 
 
 def import_module(module_name: str) -> Optional[Type]:
-    """import moudle base on the model
+    """import module base on the model
     Args:
         module_name (str): the name of target module
     """

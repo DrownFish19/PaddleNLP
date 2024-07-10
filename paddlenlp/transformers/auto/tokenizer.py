@@ -19,7 +19,7 @@ import os
 from collections import OrderedDict
 
 from ...utils.download import resolve_file_path
-from ...utils.import_utils import import_module, is_fast_tokenizer_available
+from ...utils.import_utils import import_module, is_tokenizers_available
 from ...utils.log import logger
 
 __all__ = [
@@ -107,7 +107,7 @@ FAST_TOKENIZER_MAPPING_NAMES = OrderedDict(
     ]
 )
 # For TokenizerFast
-if is_fast_tokenizer_available():
+if is_tokenizers_available():
     TOKENIZER_MAPPING_NAMES.update(FAST_TOKENIZER_MAPPING_NAMES)
 
 
@@ -152,7 +152,7 @@ class AutoTokenizer:
     @classmethod
     def _get_fast_tokenizer_class(cls, init_class, class_name):
         tokenizer_class = None
-        if is_fast_tokenizer_available():
+        if is_tokenizers_available():
             is_support_fast_tokenizer = False
             init_class_prefix = init_class[:-9]
             for fast_tokenizer_class, name in cls._fast_name_mapping.items():
@@ -293,7 +293,7 @@ class AutoTokenizer:
                                 actual_tokenizer_class = tokenizer_class[0]
                                 break
                         if use_fast:
-                            if is_fast_tokenizer_available():
+                            if is_tokenizers_available():
                                 is_support_fast_tokenizer = False
                                 for tokenizer_class in tokenizer_classes:
                                     if tokenizer_class[1]:
