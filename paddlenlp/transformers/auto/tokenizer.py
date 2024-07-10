@@ -116,8 +116,8 @@ def get_configurations():
     for key, class_name in TOKENIZER_MAPPING_NAMES.items():
         fast_name = ""
         if "Fast" in key:
-            fast_name = "fast_"
-        import_class = importlib.import_module(f"paddlenlp.transformers.{class_name}.{fast_name}tokenizer")
+            fast_name = "_fast"
+        import_class = importlib.import_module(f"paddlenlp.transformers.{class_name}.tokenizer{fast_name}")
         tokenizer_name = getattr(import_class, key)
         name = tuple(tokenizer_name.pretrained_init_configuration.keys())
         # TokenizerFast will share the same config with python tokenizer
@@ -159,7 +159,7 @@ class AutoTokenizer:
                 fast_tokenizer_class_prefix = fast_tokenizer_class[:-9]
                 if name == class_name and fast_tokenizer_class_prefix.startswith(init_class_prefix):
                     is_support_fast_tokenizer = True
-                    import_class = import_module(f"paddlenlp.transformers.{class_name}.fast_tokenizer")
+                    import_class = import_module(f"paddlenlp.transformers.{class_name}.tokenizer_fast")
                     tokenizer_class = getattr(import_class, fast_tokenizer_class)
                     break
             if not is_support_fast_tokenizer:
@@ -189,7 +189,7 @@ class AutoTokenizer:
             if init_class in cls._name_mapping:
                 class_name = cls._name_mapping[init_class.replace("Fast", "")]
                 if init_class.endswith("TokenizerFast"):
-                    import_class = import_module(f"paddlenlp.transformers.{class_name}.fast_tokenizer")
+                    import_class = import_module(f"paddlenlp.transformers.{class_name}.tokenizer_fast")
                 else:
                     import_class = import_module(f"paddlenlp.transformers.{class_name}.tokenizer")
                 tokenizer_class = getattr(import_class, init_class)

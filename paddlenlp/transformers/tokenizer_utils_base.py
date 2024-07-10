@@ -1417,7 +1417,11 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
             `<s>` is the `bos_token`, then `tokenizer.tokenize("<s>") = ['<s>`]. Otherwise, if
             `split_special_tokens=True`, then `tokenizer.tokenize("<s>")` will be give `['<','s', '>']`."""
 
-    vocab_files_names: Dict[str, str] = {}
+    resource_files_names: Dict[str, str] = {}
+    pretrained_resource_files_map: Dict[str, Dict[str, str]] = {}
+    pretrained_init_configuration: Dict[str, Dict[str, Any]] = {}
+    max_model_input_sizes: Dict[str, Optional[int]] = {}
+
     pretrained_vocab_files_map: Dict[str, Dict[str, str]] = {}
     _auto_class: Optional[str] = None
     tokenizer_config_file = TOKENIZER_CONFIG_NAME

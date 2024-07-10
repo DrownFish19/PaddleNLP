@@ -298,10 +298,3 @@ from .deberta_v2.tokenizer import *
 from .deberta_v2.configuration import *
 from .qwen2 import *
 from .qwen2_moe import *
-
-# For faster tokenizer
-from ..utils.import_utils import is_tokenizers_available
-
-if is_tokenizers_available():
-    from .tokenizer_utils_fast import PretrainedTokenizerFast
-    from .llama.tokenizer_fast import *
