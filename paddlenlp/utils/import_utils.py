@@ -83,6 +83,14 @@ def is_tokenizers_available() -> bool:
     return is_package_available("tokenizers")
 
 
+def is_sentencepiece_available() -> bool:
+    """check if `sentencepiece` ia available
+    Returns:
+        bool: if `sentencepiece` is available
+    """
+    return is_package_available("sentencepiece")
+
+
 def is_paddlenlp_ops_available() -> bool:
     """check if `paddlenlp_ops` ia available
     Returns:

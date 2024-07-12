@@ -36,6 +36,12 @@ from tokenizers.trainers import (
     WordPieceTrainer,
 )
 
+from ..utils.env import (
+    ADDED_TOKENS_NAME,
+    FULL_TOKENIZER_NAME,
+    SPECIAL_TOKENS_MAP_NAME,
+    TOKENIZER_CONFIG_NAME,
+)
 from .convert_slow_tokenizer import convert_slow_tokenizer
 from .tokenizer_utils import ChatTemplateMixin, PretrainedTokenizer
 from .tokenizer_utils_base import (
@@ -53,15 +59,6 @@ from .tokenizer_utils_base import (
     TruncationStrategy,
 )
 
-# Fast tokenizers (provided by HuggingFace tokenizer's library) can be saved in a single file
-TOKENIZER_FILE = "tokenizer.json"
-SPECIAL_TOKENS_MAP_FILE = "special_tokens_map.json"
-TOKENIZER_CONFIG_FILE = "tokenizer_config.json"
-
-# Slow tokenizers have an additional added tokens files
-ADDED_TOKENS_FILE = "added_tokens.json"
-
-
 MODEL_TO_TRAINER_MAPPING = {
     "BPE": BpeTrainer,
     "Unigram": UnigramTrainer,
@@ -69,7 +66,7 @@ MODEL_TO_TRAINER_MAPPING = {
     "WordPiece": WordPieceTrainer,
 }
 
-VOCAB_FILES_NAMES = {"tokenizer_file": TOKENIZER_FILE}
+VOCAB_FILES_NAMES = {"tokenizer_file": FULL_TOKENIZER_NAME}
 
 
 class PretrainedTokenizerFast(ChatTemplateMixin, PretrainedTokenizerBase):
@@ -129,7 +126,6 @@ class PretrainedTokenizerFast(ChatTemplateMixin, PretrainedTokenizerBase):
 
         self._decode_use_source_tokenizer = False
 
-        # Keep properties from fast tokenizer
         _truncation = self._tokenizer.truncation
 
         if _truncation is not None:
@@ -399,7 +395,7 @@ class PretrainedTokenizerFast(ChatTemplateMixin, PretrainedTokenizerBase):
         return tokens
 
     def tokenize(self, text: str, pair: Optional[str] = None, add_special_tokens: bool = False, **kwargs) -> List[str]:
-        return self.encode(text=text, text_pair=pair, add_special_tokens=add_special_tokens, **kwargs).tokens()
+        return self.encode_plus(text=text, text_pair=pair, add_special_tokens=add_special_tokens, **kwargs).tokens()
 
     def set_truncation_and_padding(
         self,
@@ -489,20 +485,19 @@ class PretrainedTokenizerFast(ChatTemplateMixin, PretrainedTokenizerBase):
         stride: int = 0,
         is_split_into_words: bool = False,
         pad_to_multiple_of: Optional[int] = None,
-        return_position_ids: Optional[bool] = None,
         return_tensors: Optional[str] = None,
         return_token_type_ids: Optional[bool] = None,
         return_attention_mask: Optional[bool] = None,
         return_overflowing_tokens: bool = False,
         return_special_tokens_mask: bool = False,
-        return_dict: bool = True,
         return_offsets_mapping: bool = False,
+        return_position_ids: Optional[bool] = None,
+        return_dict: bool = True,
         return_length: bool = False,
         verbose: bool = True,
         split_special_tokens: bool = False,
         **kwargs
     ) -> BatchEncoding:
-
         if not isinstance(batch_text_or_text_pairs, (tuple, list)):
             raise TypeError(
                 f"batch_text_or_text_pairs has to be a list or a tuple (got {type(batch_text_or_text_pairs)})"
@@ -592,7 +587,7 @@ class PretrainedTokenizerFast(ChatTemplateMixin, PretrainedTokenizerBase):
         return_length: bool = False,
         verbose: bool = True,
         split_special_tokens: bool = False,
-        **kwargs
+        **kwargs,
     ) -> BatchEncoding:
         batched_input = [(text, text_pair)] if text_pair else [text]
         batched_output = self._batch_encode_plus(
@@ -697,7 +692,7 @@ class PretrainedTokenizerFast(ChatTemplateMixin, PretrainedTokenizerBase):
 
         if save_slow:
             added_tokens_file = os.path.join(
-                save_directory, (filename_prefix + "-" if filename_prefix else "") + ADDED_TOKENS_FILE
+                save_directory, (filename_prefix + "-" if filename_prefix else "") + ADDED_TOKENS_NAME
             )
             # make sure to be forward compatible
             added_vocab = {tok: index for tok, index in self.added_tokens_encoder.items() if index >= self.vocab_size}
@@ -711,7 +706,7 @@ class PretrainedTokenizerFast(ChatTemplateMixin, PretrainedTokenizerBase):
 
         if save_fast:
             tokenizer_file = os.path.join(
-                save_directory, (filename_prefix + "-" if filename_prefix else "") + TOKENIZER_FILE
+                save_directory, (filename_prefix + "-" if filename_prefix else "") + FULL_TOKENIZER_NAME
             )
             self.backend_tokenizer.save(tokenizer_file)
             file_names = file_names + (tokenizer_file,)

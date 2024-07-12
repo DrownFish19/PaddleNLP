@@ -58,7 +58,6 @@ class LlamaTokenizer(PretrainedTokenizer):
         **kwargs
     ):
         self.sp_model_kwargs = {} if sp_model_kwargs is None else sp_model_kwargs
-        super().__init__(bos_token=bos_token, eos_token=eos_token, unk_token=unk_token, **kwargs)
 
         self.vocab_file = vocab_file
         self.add_bos_token = add_bos_token
@@ -66,6 +65,8 @@ class LlamaTokenizer(PretrainedTokenizer):
         self.decode_with_prefix_space = decode_with_prefix_space
         self.sp_model = spm.SentencePieceProcessor(**self.sp_model_kwargs)
         self.sp_model.Load(vocab_file)
+
+        super().__init__(bos_token=bos_token, eos_token=eos_token, unk_token=unk_token, **kwargs)
 
     @property
     def vocab_size(self):
