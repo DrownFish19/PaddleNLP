@@ -281,12 +281,7 @@ from typing import Collection, Dict, List, Optional, Set, Tuple, Union
 
 from ...utils.import_utils import is_tiktoken_available
 from .. import PretrainedTokenizer
-from ..tokenizer_utils_base import (
-    AddedToken,
-    BatchEncoding,
-    EncodedInput,
-    PaddingStrategy,
-)
+from ..tokenizer_utils_base import BatchEncoding, EncodedInput, PaddingStrategy
 
 VOCAB_FILES_NAMES = {"vocab_file": "tokenizer.model"}
 
@@ -326,7 +321,7 @@ class Llama3Tokenizer(PretrainedTokenizer):
         padding_side="left",
         **kwargs,
     ):
-        super().__init__(**kwargs)
+
         if not is_tiktoken_available():
             raise ValueError("tiktoken is not installed, please install it use: pip install tiktoken")
 
@@ -366,8 +361,11 @@ class Llama3Tokenizer(PretrainedTokenizer):
         if "eos_token_id" in kwargs:
             self.eos_token_id = kwargs["eos_token_id"]
 
-    def __len__(self) -> int:
-        return self.tokenizer.n_vocab
+        unk_token = "<unk>"
+        super().__init__(unk_token=unk_token, **kwargs)
+
+    # def __len__(self) -> int:
+    #     return self.tokenizer.n_vocab
 
     def get_vocab(self) -> Dict[bytes, int]:
         return self.mergeable_ranks
@@ -386,14 +384,14 @@ class Llama3Tokenizer(PretrainedTokenizer):
                 ids.append(self.mergeable_ranks.get(token))
         return ids
 
-    def _add_tokens(self, new_tokens: Union[List[str], List[AddedToken]], special_tokens: bool = False) -> int:
-        if not special_tokens and new_tokens:
-            raise ValueError("Adding regular tokens is not supported")
-        for token in new_tokens:
-            surface_form = token.content if isinstance(token, AddedToken) else token
-            if surface_form not in SPECIAL_TOKENS:
-                raise ValueError("Adding unknown special tokens is not supported")
-        return 0
+    # def _add_tokens(self, new_tokens: Union[List[str], List[AddedToken]], special_tokens: bool = False) -> int:
+    #     if not special_tokens and new_tokens:
+    #         raise ValueError("Adding regular tokens is not supported")
+    #     for token in new_tokens:
+    #         surface_form = token.content if isinstance(token, AddedToken) else token
+    #         if surface_form not in SPECIAL_TOKENS:
+    #             raise ValueError("Adding unknown special tokens is not supported")
+    #     return 0
 
     def save_vocabulary(self, save_directory: str, **kwargs) -> Tuple[str]:
         """
