@@ -23,7 +23,6 @@ tokenizer_utils_fast.py
 from __future__ import annotations
 
 import bisect
-import io
 import itertools
 import json
 import os
@@ -34,7 +33,6 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict, List, Optional, Tuple, Union, overload
 
 import numpy
-import numpy as np
 import paddle
 import six
 from jinja2 import Template
@@ -47,7 +45,6 @@ try:
 except ImportError:
     from backports.functools_lru_cache import lru_cache
 
-from ..data.vocab import Vocab
 from ..utils.env import CHAT_TEMPLATE_CONFIG_NAME
 from ..utils.log import logger
 from .tokenizer_utils_base import (
@@ -64,7 +61,7 @@ from .tokenizer_utils_base import (
     TextInputPair,
     TruncationStrategy,
 )
-from .utils import InitTrackerMeta, convert_to_dict_message, fn_args_to_dict
+from .utils import InitTrackerMeta, convert_to_dict_message
 
 __all__ = [
     "PretrainedTokenizer",
@@ -1361,15 +1358,21 @@ class PretrainedTokenizer(ChatTemplateMixin, PretrainedTokenizerBase):
                         " integers."
                     )
 
-        if return_offsets_mapping:
-            raise NotImplementedError(
-                "return_offset_mapping is not available when using Python tokenizers. "
-                "To use this feature, change your tokenizer to one deriving from "
-                "paddlenlp.PretrainedTokenizerFast."
-            )
+        # if return_offsets_mapping:
+        #     raise NotImplementedError(
+        #         "return_offset_mapping is not available when using Python tokenizers. "
+        #         "To use this feature, change your tokenizer to one deriving from "
+        #         "paddlenlp.PretrainedTokenizerFast."
+        #     )
 
         first_ids = get_input_ids(text)
         second_ids = get_input_ids(text_pair) if text_pair is not None else None
+
+        # TODO: delete this and move into PretrainedTokenizerFast
+        if return_offsets_mapping:
+            kwargs["text"] = text
+            kwargs["text_pair"] = text_pair
+        # TODO END
 
         return self.prepare_for_model(
             first_ids,
@@ -1386,6 +1389,7 @@ class PretrainedTokenizer(ChatTemplateMixin, PretrainedTokenizerBase):
             return_token_type_ids=return_token_type_ids,
             return_overflowing_tokens=return_overflowing_tokens,
             return_special_tokens_mask=return_special_tokens_mask,
+            return_offsets_mapping=return_offsets_mapping,
             return_length=return_length,
             return_position_ids=return_position_ids,
             verbose=verbose,
@@ -1441,12 +1445,12 @@ class PretrainedTokenizer(ChatTemplateMixin, PretrainedTokenizerBase):
                     "Input is not valid. Should be a string, a list/tuple of strings or a list/tuple of integers."
                 )
 
-        if return_offsets_mapping:
-            raise NotImplementedError(
-                "return_offset_mapping is not available when using Python tokenizers. "
-                "To use this feature, change your tokenizer to one deriving from "
-                "paddlenlp.PretrainedTokenizerFast."
-            )
+        # if return_offsets_mapping:
+        #     raise NotImplementedError(
+        #         "return_offset_mapping is not available when using Python tokenizers. "
+        #         "To use this feature, change your tokenizer to one deriving from "
+        #         "paddlenlp.PretrainedTokenizerFast."
+        #     )
 
         input_ids = []
         for ids_or_pair_ids in batch_text_or_text_pairs:
@@ -1460,6 +1464,24 @@ class PretrainedTokenizer(ChatTemplateMixin, PretrainedTokenizerBase):
             first_ids = get_input_ids(ids)
             second_ids = get_input_ids(pair_ids) if pair_ids is not None else None
             input_ids.append((first_ids, second_ids))
+
+        # TODO: delete this and move into PretrainedTokenizerFast
+        if stride > 0 and second_ids is not None:
+            kwargs["batch_text_or_text_pairs"] = batch_text_or_text_pairs
+        else:
+            if return_offsets_mapping:
+                has_pair = False
+                if len(batch_text_or_text_pairs) > 0:
+                    if isinstance(batch_text_or_text_pairs[0], (list, tuple)):
+                        has_pair = True
+                kwargs["texts"] = None
+                kwargs["text_pairs"] = None
+                if has_pair:
+                    kwargs["texts"] = [text[0] for text in batch_text_or_text_pairs]
+                    kwargs["text_pairs"] = [text[1] for text in batch_text_or_text_pairs]
+                else:
+                    kwargs["texts"] = [text for text in batch_text_or_text_pairs]
+        # TODO: END
 
         batch_outputs = self._batch_prepare_for_model(
             input_ids,
@@ -1606,6 +1628,177 @@ class PretrainedTokenizer(ChatTemplateMixin, PretrainedTokenizerBase):
                 token_ids_0=token_ids_0, token_ids_1=token_ids_1, already_has_special_tokens=True
             )
         return [0] * ((len(token_ids_1) if token_ids_1 else 0) + len(token_ids_0))
+
+    def _get_bert_like_offset_mapping(self, text: str):
+        """
+        Returns the map of tokens and the start and end index of their start and end character.
+        Modified from https://github.com/bojone/bert4keras/blob/master/bert4keras/tokenizers.py#L372
+        Args:
+            text (str):
+                Input text.
+        Returns:
+            list: The offset map of input text.
+
+        """
+        if text is None:
+            return None
+        split_tokens = self.tokenize(text)
+
+        normalized_text, char_mapping = "", []
+
+        for i, ch in enumerate(text):
+            if hasattr(self, "do_lower_case") and self.do_lower_case:
+                ch = ch.lower()
+                if self.basic_tokenizer.strip_accents is not False:
+                    ch = unicodedata.normalize("NFD", ch)
+                    ch = "".join([c for c in ch if unicodedata.category(c) != "Mn"])
+            elif self.basic_tokenizer.strip_accents:
+                ch = unicodedata.normalize("NFD", ch)
+                ch = "".join([c for c in ch if unicodedata.category(c) != "Mn"])
+
+            ch = "".join([c for c in ch if not (ord(c) == 0 or ord(c) == 0xFFFD or _is_control(c))])
+            normalized_text += ch
+
+            char_mapping.extend([i] * len(ch))
+        text, token_mapping, offset = normalized_text, [], 0
+
+        char_mapping_indexes = []
+        for index, token in enumerate(split_tokens):
+            if token[:2] == "##":
+                token = token[2:]
+            if token in self.all_special_tokens:
+                token = token.lower() if hasattr(self, "do_lower_case") and self.do_lower_case else token
+            # The greek letter "sigma" has 2 forms of lowercase, σ and ς respectively.
+            # When used as a final letter of a word, the final form (ς) is used. Otherwise, the form (σ) is used.
+            # https://latin.stackexchange.com/questions/6168/how-and-when-did-we-get-two-forms-of-sigma
+            if "σ" in token or "ς" in token:
+                start = text[offset:].replace("ς", "σ").index(token.replace("ς", "σ")) + offset
+            else:
+
+                # try to fix: https://github.com/PaddlePaddle/PaddleNLP/issues/3985
+                if token not in text[offset:]:
+                    # check whether there are consecutive UNK tokens, eg: ['好', '[UNK]', '[UNK]', 'good']
+                    if index < len(split_tokens) - 1 and split_tokens[index + 1] in self.all_special_tokens:
+                        start = offset
+                        token = " "  # only contains one char
+                    else:
+                        start = -1
+                else:
+                    start = text[offset:].index(token) + offset
+
+            end = start + len(token)
+            char_mapping_indexes.append([start, end])
+
+            if start != -1:
+                offset = end
+
+        token_mapping = []
+        for index, (start, end) in enumerate(char_mapping_indexes):
+            if start == -1:
+                # init start
+                if index == 0:
+                    start = 0
+                else:
+                    start = char_mapping_indexes[index - 1][1]
+
+                # init end
+                if index == len(char_mapping_indexes) - 1:
+                    end = len(char_mapping)
+                else:
+                    # next start
+                    end = char_mapping_indexes[index + 1][0]
+
+            token_mapping.append((char_mapping[start], char_mapping[end - 1] + 1))
+
+        return token_mapping
+
+    def get_offset_mapping(self, text: str, split_tokens: Optional[List[str]] = None):
+        """
+        Returns the map of tokens and the start and end index of their start and end character.
+        Modified from https://github.com/bojone/bert4keras/blob/master/bert4keras/tokenizers.py#L372
+        Args:
+            text (str):
+                Input text.
+            split_tokens (Optional[List[str]]):
+                the tokens which has been split which can accelerate the operation.
+
+        Returns:
+            list: The offset map of input text.
+
+        """
+        if text is None:
+            return None
+        split_tokens = self.tokenize(text)
+
+        # bert-like tokenizer use the old-school code block
+        if hasattr(self, "basic_tokenizer") or hasattr(self, "wordpiece_tokenizer"):
+            return self._get_bert_like_offset_mapping(text)
+
+        if not split_tokens:
+            split_tokens = self.tokenize(text)
+
+        normalized_text, char_mapping = "", []
+
+        for i, ch in enumerate(text):
+            normalized_text += normalize_chars(ch)
+            char_mapping.extend([i] * len(ch))
+
+        text, token_mapping, offset = normalized_text, [], 0
+        do_lower_case = getattr(self, "do_lower_case", False)
+
+        # lower the text if the token is lower-cased
+        # keep align with token
+        if do_lower_case:
+            text = text.lower()
+
+        char_mapping_indexes = []
+        for token in split_tokens:
+
+            # convert tokens into original string
+            token: str = self.convert_tokens_to_string(token).strip()
+
+            if token in self.all_special_tokens:
+                if do_lower_case:
+                    token = token.lower()
+
+            # The greek letter "sigma" has 2 forms of lowercase, σ and ς respectively.
+            # When used as a final letter of a word, the final form (ς) is used. Otherwise, the form (σ) is used.
+            # https://latin.stackexchange.com/questions/6168/how-and-when-did-we-get-two-forms-of-sigma
+            if "σ" in token or "ς" in token:
+                start = text[offset:].replace("ς", "σ").index(token.replace("ς", "σ")) + offset
+            else:
+
+                # try to fix: https://github.com/PaddlePaddle/PaddleNLP/issues/3985
+                if token not in text[offset:]:
+                    start = -1
+                else:
+                    start = text[offset:].index(token) + offset
+
+            end = start + len(token)
+            char_mapping_indexes.append([start, end])
+
+            if start != -1:
+                offset = end
+
+        token_mapping = []
+        for index, (start, end) in enumerate(char_mapping_indexes):
+            if start == -1:
+                # init start
+                if index == 0:
+                    start = 0
+                else:
+                    start = char_mapping_indexes[index - 1][1]
+
+                # init end
+                if index == len(char_mapping_indexes) - 1:
+                    end = len(char_mapping)
+                else:
+                    # next start
+                    end = char_mapping_indexes[index + 1][0]
+
+            token_mapping.append((char_mapping[start], char_mapping[end - 1] + 1))
+
+        return token_mapping
 
     @overload
     def convert_ids_to_tokens(self, ids: int, skip_special_tokens: bool = False) -> str:
