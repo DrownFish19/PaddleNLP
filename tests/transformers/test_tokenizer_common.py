@@ -56,6 +56,7 @@ class TokenizerTesterMixin:
 
     tokenizer_class = None
     space_between_special_tokens = False
+    test_slow_tokenizer = True
     from_pretrained_kwargs = None
     from_pretrained_filter = None
     from_pretrained_vocab_key = "vocab_file"
@@ -382,6 +383,9 @@ class TokenizerTesterMixin:
             self.assertTrue(tokenizer.model_input_names[0] in accepted_model_main_input_names)
 
     def test_tokenizer_slow_store_full_signature(self):
+        if not self.test_slow_tokenizer:
+            self.skipTest(reason="test_slow_tokenizer is set to False")
+
         signature = inspect.signature(self.tokenizer_class.__init__)
         tokenizer = self.get_tokenizer()
 
