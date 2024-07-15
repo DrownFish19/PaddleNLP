@@ -362,7 +362,8 @@ class Llama3Tokenizer(PretrainedTokenizer):
             self.eos_token_id = kwargs["eos_token_id"]
 
         unk_token = "<unk>"
-        super().__init__(unk_token=unk_token, **kwargs)
+        pad_token = self.convert_ids_to_tokens(self.eos_token_id)
+        super().__init__(unk_token=unk_token, pad_token=pad_token, **kwargs)
 
     # def __len__(self) -> int:
     #     return self.tokenizer.n_vocab
