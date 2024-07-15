@@ -1625,7 +1625,7 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
             "special_tokens_map_file": SPECIAL_TOKENS_MAP_NAME,  # kept only for legacy
             "tokenizer_config_file": TOKENIZER_CONFIG_NAME,
             # tokenizer_file used to initialize a slow from a fast. Properly copy the `addedTokens` instead of adding in random orders
-            "tokenizer_file": FULL_TOKENIZER_NAME,
+            # "tokenizer_file": FULL_TOKENIZER_NAME,
             "chat_template_file": CHAT_TEMPLATE_CONFIG_NAME,
         }
 
@@ -1636,7 +1636,7 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
             # Deep copy to avoid modifying the class attributes
             vocab_files = copy.deepcopy(cls.resource_files_names)
             vocab_files["tokenizer_config_file"] = cls.tokenizer_config_file
-            vocab_files["tokenizer_file"] = cls.tokenizer_file
+            # vocab_files["tokenizer_file"] = cls.tokenizer_file
 
         # From built-in pretrained models
         elif pretrained_model_name_or_path in cls.pretrained_init_configuration:
@@ -1646,7 +1646,7 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
         # From local dir path
         elif os.path.isdir(pretrained_model_name_or_path):
             vocab_files_target["tokenizer_config_file"] = cls.tokenizer_config_file
-            vocab_files["tokenizer_file"] = cls.tokenizer_file
+            # vocab_files["tokenizer_file"] = cls.tokenizer_file
             for file_id, file_name in vocab_files_target.items():
                 full_file_name = os.path.join(pretrained_model_name_or_path, subfolder, file_name)
                 if os.path.isfile(full_file_name):
@@ -2714,6 +2714,8 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
             **kwargs,
         )
 
+    encode = encode_plus
+
     def _encode_plus(
         self,
         text: Union[TextInput, PreTokenizedInput, EncodedInput],
@@ -2826,6 +2828,8 @@ class PretrainedTokenizerBase(SpecialTokensMixin):
             verbose=verbose,
             **kwargs,
         )
+
+    batch_encode = batch_encode_plus
 
     def _batch_encode_plus(
         self,
