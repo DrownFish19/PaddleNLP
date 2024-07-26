@@ -44,7 +44,7 @@ from ..utils.env import CHAT_TEMPLATE_CONFIG_NAME, TOKENIZER_CONFIG_NAME
 from ..utils.log import logger
 
 
-@dataclass(frozen=False, eq=True)
+@dataclass(frozen=True, eq=True)
 class AddedToken:
     """
     AddedToken represents a token to be added to a Tokenizer An AddedToken can have special options defining the
