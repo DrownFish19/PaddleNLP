@@ -907,60 +907,7 @@ class SpecialTokensMixin:
         return self._add_tokens(new_tokens, special_tokens=special_tokens)
 
     def _add_tokens(self, new_tokens: Union[List[str], List[AddedToken]], special_tokens: bool = False) -> int:
-        added_tokens = 0
-        if new_tokens is None:
-            return added_tokens
-        # TODO this is fairly slow to improve!
-        current_vocab = self.get_vocab().copy()
-        new_idx = len(current_vocab)  # only call this once, len gives the last index + 1
-        for token in new_tokens:
-            if not isinstance(token, (str, AddedToken)):
-                raise TypeError(f"Token {token} is not a string but a {type(token)}.")
-            if str(token) == "":
-                continue
-            if isinstance(token, str):
-                if token in self._added_tokens_encoder:
-                    continue
-                else:
-                    # very important for fast and slow equivalence!
-                    is_special = token in self.all_special_tokens or special_tokens
-                    token = AddedToken(
-                        token, rstrip=False, lstrip=False, normalized=not is_special, special=is_special
-                    )
-            elif special_tokens:
-                # doing token.special=True changes the normalization! will fix in rust
-                # this is important and the only reason why the AddedTokens in each class are normalized by default
-                token.__setstate__({"special": True, "normalized": token.normalized})
-            if token in self._added_tokens_decoder:
-                continue
-            if not token.special and token.normalized and getattr(self, "do_lower_case", False):
-                # Normalize if requested
-                token.content = token.content.lower()
-            if token.content not in current_vocab:
-                token_index = new_idx + added_tokens
-                current_vocab[token.content] = token_index
-                added_tokens += 1
-            else:
-                token_index = current_vocab[token.content]
-
-            if token.special and str(token) not in self.all_special_tokens:
-                self._additional_special_tokens.append(token)
-            # the setter automatically updates the reverse map
-            self._added_tokens_decoder[token_index] = token
-            self._added_tokens_encoder[token.content] = token_index
-            if self.verbose:
-                logger.info(f"Adding {token} to the vocabulary")
-
-        self._update_trie()
-        return added_tokens
-
-    def _update_trie(self, unique_no_split_tokens: Optional[str] = []):
-        for token in self._added_tokens_decoder.values():
-            if token not in self.tokens_trie._tokens:
-                self.tokens_trie.add(token.content)
-        for token in unique_no_split_tokens:
-            if token not in self.tokens_trie._tokens:
-                self.tokens_trie.add(token)
+        raise NotImplementedError
 
     @property
     def bos_token(self) -> str:
