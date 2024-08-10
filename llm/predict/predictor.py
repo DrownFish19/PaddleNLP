@@ -96,8 +96,8 @@ class PredictorArgument:
     )
     inference_model: bool = field(default=False, metadata={"help": "whether use InferenceModel to do generation"})
     quant_type: str = field(
-        default=None,
-        metadata={"help": "Quantization type. Supported values: a8w8, weight_only_int4, weight_only_int8"},
+        default="",
+        metadata={"help": "Quantization type. Supported values: a8w8, a8w8c8, weight_only_int4, weight_only_int8"},
     )
     avx_model: bool = field(
         default=False, metadata={"help": "whether use AvxModel to do generation when using cpu inference"}
@@ -116,9 +116,9 @@ class PredictorArgument:
 
     block_attn: bool = field(default=False, metadata={"help": "whether use block attention"})
     block_size: int = field(default=64, metadata={"help": "the block size for cache_kvs."})
-    cachekv_int8: bool = field(
-        default=False,
-        metadata={"help": "If cachekv_int8 set as `True`, cache kv would be quantized to int8 dynamically. "},
+    cachekv_int8_type: str = field(
+        default=None,
+        metadata={"help": "If cachekv_int8_type set as `dynamic`, cache kv would be quantized to int8 dynamically. If cachekv_int8_type set as `static`, cache kv would be quantized to int8 Statically."},
     )
 
     chat_template: str = field(
@@ -135,10 +135,6 @@ class PredictorArgument:
     @property
     def total_max_length(self):
         return self.src_length + self.max_length
-
-    @property
-    def use_cachekv_int8(self):
-        return "dynamic" if self.cachekv_int8 else "None"
 
 
 @dataclass
@@ -248,16 +244,19 @@ class BasePredictor:
     def _infer(self, inputs):
         raise NotImplementedError
 
-    def _postprocess(self, predictions):
+    def _postprocess(self, predictions, return_tokens=False):
         decoded_predictions = self.tokenizer.batch_decode(
             predictions, skip_special_tokens=True, clean_up_tokenization_spaces=False
         )
-        return decoded_predictions
+        if return_tokens:
+            return decoded_predictions, predictions
+        else:
+            return decoded_predictions
 
-    def predict(self, input_texts: str | list[str]):
+    def predict(self, input_texts: str | list[str], return_tokens=False):
         tokenized_source = self._preprocess(input_texts)
         predictions = self._infer(tokenized_source)
-        decoded_predictions = self._postprocess(predictions)
+        decoded_predictions = self._postprocess(predictions, return_tokens=return_tokens)
         return decoded_predictions
 
 
@@ -328,9 +327,9 @@ class DygraphPredictor(BasePredictor):
             bos_token_id=self.tokenizer.bos_token_id,
             eos_token_id=get_eos_token_id(self.tokenizer, self.generation_config),
             pad_token_id=self.tokenizer.pad_token_id,
-            decode_strategy="greedy_search"
-            if self.config.top_k == 1 and self.config.top_p == 1.0
-            else self.config.decode_strategy,
+            decode_strategy=(
+                "greedy_search" if self.config.top_k == 1 and self.config.top_p == 1.0 else self.config.decode_strategy
+            ),
             temperature=self.config.temperature,
             top_k=self.config.top_k,
             top_p=self.config.top_p,
@@ -346,12 +345,7 @@ class StaticGraphPredictor(BasePredictor):
     def __init__(self, config: PredictorArgument, tokenizer: PretrainedTokenizer = None):
         super().__init__(config, tokenizer)
 
-        params_path = os.path.join(self.config.model_name_or_path, self.config.model_prefix + ".pdiparams")
-        if paddle.framework.use_pir_api():
-            model_path = os.path.join(self.config.model_name_or_path, self.config.model_prefix + ".json")
-        else:
-            model_path = os.path.join(self.config.model_name_or_path, self.config.model_prefix + ".pdmodel")
-        inference_config = paddle.inference.Config(model_path, params_path)
+        inference_config = paddle.inference.Config(self.config.model_name_or_path, self.config.model_prefix)
 
         if self.config.device == "gpu":
             # set GPU configs accordingly
@@ -475,13 +469,16 @@ class InferencePredictorMixin:
             )
             self.generation_config = None
 
-    def _postprocess(self, predictions):
+    def _postprocess(self, predictions, return_tokens=False):
         if paddle.distributed.get_rank() == 0:
             tokens: np.ndarray = load_real_time_tokens()
             decoded_predictions = self.tokenizer.batch_decode(
                 tokens.tolist(), skip_special_tokens=True, clean_up_tokenization_spaces=False
             )
-            return decoded_predictions
+            if return_tokens:
+                return decoded_predictions, tokens.tolist()
+            else:
+                return decoded_predictions
         else:
             return None
 
@@ -823,7 +820,7 @@ class BlockInferencePredictorMixin:
                 paddle.ones(shape=[config.batch_size, 1, config.src_length, config.src_length], dtype=config.dtype)
             )
 
-        if config.use_cachekv_int8 == "dynamic":
+        if config.cachekv_int8_type == "dynamic":
             self.k_quant_scales = [
                 paddle.zeros([config.batch_size, self.num_attention_heads], dtype="float32")
                 for _ in range(self.num_layers)
@@ -974,6 +971,7 @@ class BlockInferencePredictorMixin:
                 text,
                 return_tensors="np",
                 padding=True,
+                truncation=True,
                 max_length=self.config.src_length,
                 # if use chat_template, it will not add special_tokens
                 add_special_tokens=self.tokenizer.chat_template is None
@@ -1013,17 +1011,17 @@ class DygraphBlockInferencePredictor(BlockInferencePredictorMixin, BasePredictor
         BasePredictor.__init__(self, config, tokenizer)
         BlockInferencePredictorMixin.__init__(self, config, tokenizer)
 
-        if config.use_cachekv_int8 == "dynamic" or config.use_cachekv_int8 == "static":
-            self.cache_kvs = [paddle.zeros(shape, dtype="uint8") for shape in self.cache_kvs_shape]
-        else:
-            self.cache_kvs = [paddle.zeros(shape, dtype=self.dtype) for shape in self.cache_kvs_shape]
+        cachekv_dtype = self.dtype
+        if config.cachekv_int8_type is not None:
+            cachekv_dtype = "uint8"
+        self.cache_kvs = [paddle.zeros(shape, dtype=cachekv_dtype) for shape in self.cache_kvs_shape]
 
         self.model = model
 
         self.init_inputs(config)
         if config.export_precache:
             self.inputs["pre_caches"] = self.pre_caches
-        if config.use_cachekv_int8 == "dynamic":
+        if config.cachekv_int8_type == "dynamic":
             self.inputs["k_quant_scales"] = self.k_quant_scales
             self.inputs["v_quant_scales"] = self.v_quant_scales
             self.inputs["k_dequant_scales"] = self.k_dequant_scales
@@ -1038,7 +1036,7 @@ class DygraphBlockInferencePredictor(BlockInferencePredictorMixin, BasePredictor
         )
 
     @paddle.no_grad()
-    def predict(self, input_texts: str | list[str]):
+    def predict(self, input_texts: str | list[str], return_tokens=False):
         self._preprocess(input_texts)
 
         result_queue = mp.Queue()
@@ -1059,9 +1057,15 @@ class DygraphBlockInferencePredictor(BlockInferencePredictorMixin, BasePredictor
             self.used_list[i] = []
 
         outputs = []
+        output_tokens = []
         while len(outputs) < self.batch_size:
-            outputs.append(result_queue.get(timeout=1)[-1])
-        return outputs
+            result = result_queue.get(timeout=1)
+            outputs.append(result[-1])
+            output_tokens.append(result[-2])
+        if return_tokens:
+            return outputs, output_tokens
+        else:
+            return outputs
 
 
 class StaticBlockInferencePredictor(BlockInferencePredictorMixin, BasePredictor):
@@ -1082,23 +1086,19 @@ class StaticBlockInferencePredictor(BlockInferencePredictorMixin, BasePredictor)
                 self.inputs["pre_caches_{}".format(i)] = self.pre_caches[i]
 
         self.cache_kvs = {}
-        if config.use_cachekv_int8 == "dynamic" or config.use_cachekv_int8 == "static":
-            for i in range(len(self.cache_kvs_shape) // 2):
-                self.cache_kvs["key_caches_{}".format(i)] = paddle.zeros(self.cache_kvs_shape[2 * i], dtype="uint8")
-                self.cache_kvs["value_caches_{}".format(i)] = paddle.zeros(
-                    self.cache_kvs_shape[2 * i + 1], dtype="uint8"
-                )
-        else:
-            for i in range(len(self.cache_kvs_shape) // 2):
-                self.cache_kvs["key_caches_{}".format(i)] = paddle.zeros(
-                    self.cache_kvs_shape[2 * i], dtype=config.dtype
-                )
-                self.cache_kvs["value_caches_{}".format(i)] = paddle.zeros(
-                    self.cache_kvs_shape[2 * i + 1], dtype=config.dtype
-                )
+        cachekv_dtype = config.dtype
+        if config.cachekv_int8_type is not None:
+            cachekv_dtype = "uint8"
+        for i in range(len(self.cache_kvs_shape) // 2):
+            self.cache_kvs["key_caches_{}".format(i)] = paddle.zeros(
+                self.cache_kvs_shape[2 * i], dtype=cachekv_dtype
+            )
+            self.cache_kvs["value_caches_{}".format(i)] = paddle.zeros(
+                self.cache_kvs_shape[2 * i + 1], dtype=cachekv_dtype
+            )
 
         for i in range(self.num_layers):
-            if self.config.use_cachekv_int8 == "dynamic":
+            if self.config.cachekv_int8_type == "dynamic":
                 self.inputs["k_quant_scales_" + str(i)] = self.k_quant_scales[i]
                 self.inputs["v_quant_scales_" + str(i)] = self.v_quant_scales[i]
                 self.inputs["k_dequant_scales_" + str(i)] = self.k_dequant_scales[i]
@@ -1184,7 +1184,7 @@ class StaticBlockInferencePredictor(BlockInferencePredictorMixin, BasePredictor)
     def _infer(self):
         self.predictor.run()
 
-    def predict(self, input_texts: str | list[str]):
+    def predict(self, input_texts: str | list[str], return_tokens=False):
 
         s_time = time.time()
         self._preprocess(input_texts)
@@ -1217,14 +1217,22 @@ class StaticBlockInferencePredictor(BlockInferencePredictorMixin, BasePredictor)
             self.used_list[i] = []
 
         outputs = []
+        output_tokens = []
         while len(outputs) < self.batch_size:
-            outputs.append(result_queue.get(timeout=1)[-1])
-        return outputs
+            result = result_queue.get(timeout=1)
+            outputs.append(result[-1])
+            output_tokens.append(result[-2])
+        if return_tokens:
+            return outputs, output_tokens
+        else:
+            return outputs
 
     def _preprocess(self, source):
         BlockInferencePredictorMixin._preprocess(self, source)
         for i, text in enumerate(source):
-            tokens = self.tokenizer(text, return_tensors="np", padding=False, max_length=(self.config.src_length))
+            tokens = self.tokenizer(
+                text, return_tensors="np", padding=False, truncation=True, max_length=(self.config.src_length)
+            )
             input_ids = tokens["input_ids"][0]
             length = len(input_ids)
             need_block_nums = (
@@ -1256,7 +1264,7 @@ def create_predictor(
 
     # TODO(wj-Mcat): fix llama tokenzier pad_token bug
     if (isinstance(tokenizer, (LlamaTokenizer, Llama3Tokenizer))) and not tokenizer.pad_token:
-        tokenizer.pad_token = tokenizer.bos_token
+        tokenizer.pad_token = tokenizer.eos_token
 
     config = AutoConfig.from_pretrained(predictor_args.model_name_or_path)
 
@@ -1346,34 +1354,22 @@ def create_predictor(
             config = AutoConfig.from_pretrained(predictor_args.model_name_or_path)
             config.tensor_parallel_degree = tensor_parallel_degree
             config.tensor_parallel_rank = tensor_parallel_rank
-            config.weight_only_quant_bits = -1
-            config.quant_type = None
-            config.model_name_or_path = ""
-            config.use_cachekv_int8 = predictor_args.use_cachekv_int8
+            config.model_name_or_path = predictor_args.model_name_or_path
+            config.quant_type = predictor_args.quant_type
+            config.cachekv_int8_type = predictor_args.cachekv_int8_type
             config.single_card_ptq = True
             if predictor_args.avx_model:
                 config.avx_type = predictor_args.avx_type
 
-            if predictor_args.quant_type is not None:
-                if predictor_args.quant_type.startswith("weight_only_int"):
-                    weight_only_quant_bits = int(predictor_args.quant_type[-1])
-                    config.weight_only_quant_bits = weight_only_quant_bits
-                    config.quant_type = predictor_args.quant_type
-                elif predictor_args.quant_type == "a8w8":
-                    config.quant_type = predictor_args.quant_type
-
-            if config.quantization_config.quant_type is not None and "a8w8" in config.quantization_config.quant_type:
-                config.model_name_or_path = predictor_args.model_name_or_path
+            if config.quantization_config.quant_type is not None:
                 config.quant_type = config.quantization_config.quant_type
+                if "c8" in config.quant_type:
+                    config.cachekv_int8_type = "static"
 
                 ptq_multicards_num = get_ptq_multicards_num(config.model_name_or_path)
                 logger.info(f"PTQ from {ptq_multicards_num} cards, so we will not split")
                 if ptq_multicards_num > 1:
                     config.single_card_ptq = False
-
-                # Turn on GEMM int8 kernel tuning
-                paddle.base.core.enable_autotune()
-                paddle.base.core.update_autotune_status()
 
             if "llama" in config.architectures[0].lower():
                 if model_args.model_type == "llama-img2txt":
@@ -1514,7 +1510,6 @@ def create_predictor(
                 if predictor_args.block_attn:
                     config.block_size = predictor_args.block_size
                     config.max_seq_len = predictor_args.total_max_length
-                    config.use_dynamic_cachekv_quant = predictor_args.use_cachekv_int8 == "dynamic"
                     from paddlenlp.experimental.transformers import (
                         LlamaForCausalLMBlockInferenceModel as LlamaInferenceModel,
                     )
@@ -1636,8 +1631,8 @@ def predict():
                     target_texts.append("")
 
     else:
-        source_texts = ["解释一下“温故而知新”", "你好，请问你是谁?"]
-        target_texts = ["", ""]
+        source_texts = ["你好，请问你是谁?"] * predictor_args.batch_size
+        target_texts = [""] * predictor_args.batch_size
 
     batch_source_texts = batchfy_text(source_texts, predictor_args.batch_size)
     batch_target_texts = batchfy_text(target_texts, predictor_args.batch_size)
@@ -1685,8 +1680,8 @@ def benchmark(predictor, predictor_args, model_args):
     output_tokens = 0
     for _ in range(test_time):
         for bs, batch_source_text in enumerate(batch_benchmark_texts):
-            outputs = predictor.predict(batch_source_text)
-            output_tokens += sum([len(output) for output in outputs])
+            outputs, batch_tokens = predictor.predict(batch_source_text, return_tokens=True)
+            output_tokens += sum([len(tokens) for tokens in batch_tokens])
     end = time.perf_counter()
     print("Avg Elapse time is: ", (end - start) / test_time)
     print("Output tokens is: ", output_tokens)
