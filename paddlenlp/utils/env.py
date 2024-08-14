@@ -83,6 +83,9 @@ LEGACY_CONFIG_NAME = "model_config.json"
 LORA_CONFIG_NAME = "lora_config.json"
 LORA_WEIGHTS_NAME = "lora_model_state.pdparams"
 
+VERA_CONFIG_NAME = "vera_config.json"
+VERA_WEIGHTS_NAME = "vera_model_state.pdparams"
+
 PREFIX_CONFIG_NAME = "prefix_config.json"
 PREFIX_WEIGHTS_NAME = "prefix_model_state.pdparams"
 PADDLE_PEFT_WEIGHTS_INDEX_NAME = "peft_model.pdparams.index.json"

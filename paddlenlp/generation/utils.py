@@ -596,8 +596,13 @@ class GenerationMixin(object):
 
     def set_pad_token_id(self, pad_token_id, eos_token_id):
         if pad_token_id is None and eos_token_id is not None:
-            print("Setting `pad_token_id` to `eos_token_id`:{} for " "open-end generation.".format(eos_token_id))
-            pad_token_id = eos_token_id
+            logger.warning(
+                "Setting `pad_token_id` to `eos_token_id`:{} for " "open-end generation.".format(eos_token_id)
+            )
+            if isinstance(eos_token_id, list):
+                pad_token_id = eos_token_id[0]
+            else:
+                pad_token_id = eos_token_id
         return pad_token_id
 
     @paddle.no_grad()
@@ -1210,6 +1215,8 @@ class GenerationMixin(object):
             if top_p is not None and top_p < 1.0:
                 probs = TopPProcess(probs, top_p, min_tokens_to_keep)
             if paddle.device.is_compiled_with_custom_device("gcu"):
+                probs = paddle.cast(probs, "float32")
+            if paddle.device.is_compiled_with_xpu():
                 probs = paddle.cast(probs, "float32")
 
             # multinomial already support fp16 and bf16 currently, fix issue: https://github.com/PaddlePaddle/Paddle/issues/51852
