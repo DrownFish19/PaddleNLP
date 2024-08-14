@@ -19,7 +19,7 @@ import os
 from collections import OrderedDict
 
 from ...utils.download import resolve_file_path
-from ...utils.import_utils import import_module
+from ...utils.import_utils import import_module, is_tokenizers_available
 from ...utils.log import logger
 
 __all__ = [
@@ -102,14 +102,31 @@ TOKENIZER_MAPPING_NAMES = OrderedDict(
     ]
 )
 
+FAST_TOKENIZER_MAPPING_NAMES = OrderedDict(
+    [
+        ("LlamaTokenizerFast", "llama"),
+    ]
+)
+# For TokenizerFast
+if is_tokenizers_available():
+    TOKENIZER_MAPPING_NAMES.update(FAST_TOKENIZER_MAPPING_NAMES)
+
 
 def get_configurations():
     MAPPING_NAMES = OrderedDict()
     for key, class_name in TOKENIZER_MAPPING_NAMES.items():
-        import_class = importlib.import_module(f"paddlenlp.transformers.{class_name}.tokenizer")
+        fast_name = ""
+        if "Fast" in key:
+            fast_name = "_fast"
+        import_class = importlib.import_module(f"paddlenlp.transformers.{class_name}.tokenizer{fast_name}")
         tokenizer_name = getattr(import_class, key)
         name = tuple(tokenizer_name.pretrained_init_configuration.keys())
-        MAPPING_NAMES[name] = tokenizer_name
+        # TokenizerFast will share the same config with python tokenizer
+        # So same config would map more than one tokenizer
+        if MAPPING_NAMES.get(name, None) is None:
+            MAPPING_NAMES[name] = []
+        # (tokenizer_name, is_fast)
+        MAPPING_NAMES[name].append((tokenizer_name, fast_name != ""))
     return MAPPING_NAMES
 
 
@@ -124,6 +141,7 @@ class AutoTokenizer:
     MAPPING_NAMES = get_configurations()
     _tokenizer_mapping = MAPPING_NAMES
     _name_mapping = TOKENIZER_MAPPING_NAMES
+    _fast_name_mapping = FAST_TOKENIZER_MAPPING_NAMES
     tokenizer_config_file = "tokenizer_config.json"
 
     def __init__(self, *args, **kwargs):
@@ -133,9 +151,34 @@ class AutoTokenizer:
         )
 
     @classmethod
-    def _get_tokenizer_class_from_config(cls, pretrained_model_name_or_path, config_file_path, use_fast=None):
-        if use_fast is not None:
-            raise ValueError("use_fast is deprecated")
+    def _get_fast_tokenizer_class(cls, init_class, class_name):
+        tokenizer_class = None
+        if is_tokenizers_available():
+            is_support_fast_tokenizer = False
+            init_class_prefix = init_class[:-9]
+            for fast_tokenizer_class, name in cls._fast_name_mapping.items():
+                fast_tokenizer_class_prefix = fast_tokenizer_class[:-9]
+                if name == class_name and fast_tokenizer_class_prefix.startswith(init_class_prefix):
+                    is_support_fast_tokenizer = True
+                    import_class = import_module(f"paddlenlp.transformers.{class_name}.tokenizer_fast")
+                    tokenizer_class = getattr(import_class, fast_tokenizer_class)
+                    break
+            if not is_support_fast_tokenizer:
+                logger.warning(
+                    f"The tokenizer {tokenizer_class} doesn't have the fast version."
+                    " Please check the map `paddlenlp.transformers.auto.tokenizer.FAST_TOKENIZER_MAPPING_NAMES`"
+                    " to see which fast tokenizers are currently supported."
+                )
+        else:
+            logger.warning(
+                "Can't find the tokenizers package, "
+                "please ensure install fast_tokenizer correctly. "
+                "You can install tokenizers by `pip install tokenizers`."
+            )
+        return tokenizer_class
+
+    @classmethod
+    def _get_tokenizer_class_from_config(cls, pretrained_model_name_or_path, config_file_path, use_fast):
         with io.open(config_file_path, encoding="utf-8") as f:
             init_kwargs = json.load(f)
         # class name corresponds to this configuration
@@ -145,14 +188,15 @@ class AutoTokenizer:
 
         if init_class:
             if init_class in cls._name_mapping:
-                class_name = cls._name_mapping[init_class]
-                import_class = import_module(f"paddlenlp.transformers.{class_name}.tokenizer")
-                tokenizer_class = None
-                try:
-                    if tokenizer_class is None:
-                        tokenizer_class = getattr(import_class, init_class)
-                except:
-                    raise ValueError(f"Tokenizer class {init_class} is not currently imported.")
+                class_name = cls._name_mapping[init_class.replace("Fast", "")]
+                if init_class.endswith("TokenizerFast"):
+                    import_class = import_module(f"paddlenlp.transformers.{class_name}.tokenizer_fast")
+                else:
+                    import_class = import_module(f"paddlenlp.transformers.{class_name}.tokenizer")
+                tokenizer_class = getattr(import_class, init_class)
+                if use_fast:
+                    fast_tokenizer_class = cls._get_fast_tokenizer_class(init_class, class_name)
+                    tokenizer_class = fast_tokenizer_class if fast_tokenizer_class else tokenizer_class
                 return tokenizer_class
             else:
                 import_class = import_module("paddlenlp.transformers")
@@ -170,6 +214,9 @@ class AutoTokenizer:
                     class_name = cls._name_mapping[init_class]
                     import_class = import_module(f"paddlenlp.transformers.{class_name}.tokenizer")
                     tokenizer_class = getattr(import_class, init_class)
+                    if use_fast:
+                        fast_tokenizer_class = cls._get_fast_tokenizer_class(init_class, class_name)
+                        tokenizer_class = fast_tokenizer_class if fast_tokenizer_class else tokenizer_class
                     break
             return tokenizer_class
 
@@ -218,17 +265,17 @@ class AutoTokenizer:
                 # <class 'paddlenlp.transformers.bert.tokenizer.BertTokenizer'>
         """
         # Default not to use fast tokenizer
-        use_faster = kwargs.pop("use_faster", None)
-        use_fast = kwargs.pop("use_fast", None)
-        if use_fast is not None or use_faster is not None:
-            raise ValueError("use_fast is deprecated")
-
+        use_fast = kwargs.pop("use_fast", False)
         cache_dir = kwargs.get("cache_dir", None)
         subfolder = kwargs.get("subfolder", "")
         if subfolder is None:
             subfolder = ""
         from_aistudio = kwargs.get("from_aistudio", False)
         from_hf_hub = kwargs.get("from_hf_hub", False)
+
+        if "use_faster" in kwargs:
+            use_fast = kwargs.pop("use_faster", False)
+            logger.warning("The keyword argument `use_faster` is deprecated in future, please use `use_fast` instead")
 
         all_tokenizer_names = []
         for names, tokenizer_class in cls._tokenizer_mapping.items():
@@ -237,11 +284,39 @@ class AutoTokenizer:
 
         # From built-in pretrained models
         if pretrained_model_name_or_path in all_tokenizer_names:
-            for names, tokenizer_class in cls._tokenizer_mapping.items():
+            for names, tokenizer_classes in cls._tokenizer_mapping.items():
                 for pattern in names:
                     if pattern == pretrained_model_name_or_path:
-                        logger.info("We are using %s to load '%s'." % (tokenizer_class, pretrained_model_name_or_path))
-                        return tokenizer_class.from_pretrained(pretrained_model_name_or_path, *model_args, **kwargs)
+                        actual_tokenizer_class = None
+                        # Default setting the python tokenizer to actual_tokenizer_class
+                        for tokenizer_class in tokenizer_classes:
+                            if not tokenizer_class[1]:
+                                actual_tokenizer_class = tokenizer_class[0]
+                                break
+                        if use_fast:
+                            if is_tokenizers_available():
+                                is_support_fast_tokenizer = False
+                                for tokenizer_class in tokenizer_classes:
+                                    if tokenizer_class[1]:
+                                        actual_tokenizer_class = tokenizer_class[0]
+                                        is_support_fast_tokenizer = True
+                                        break
+                                if not is_support_fast_tokenizer:
+                                    logger.warning(
+                                        f"The tokenizer {actual_tokenizer_class} doesn't have the fast version."
+                                        " Please check the map `paddlenlp.transformers.auto.tokenizer.FAST_TOKENIZER_MAPPING_NAMES`"
+                                        " to see which fast tokenizers are currently supported."
+                                    )
+                            else:
+                                logger.warning(
+                                    "Can't find the fast_tokenizer package, "
+                                    "please ensure install fast_tokenizer correctly. "
+                                    "You can install fast_tokenizer by `pip install fast-tokenizer-python`."
+                                )
+                        logger.info(f"We are using {tokenizer_class} to load '{pretrained_model_name_or_path}'.")
+                        return actual_tokenizer_class.from_pretrained(
+                            pretrained_model_name_or_path, *model_args, **kwargs
+                        )
 
         config_file = resolve_file_path(
             pretrained_model_name_or_path,
