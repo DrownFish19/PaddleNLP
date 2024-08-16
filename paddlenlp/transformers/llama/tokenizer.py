@@ -22,7 +22,12 @@ import sentencepiece as spm
 
 from ...utils.log import logger
 from .. import PretrainedTokenizer
-from ..tokenizer_utils_base import BatchEncoding, EncodedInput, PaddingStrategy
+from ..tokenizer_utils_base import (
+    AddedToken,
+    BatchEncoding,
+    EncodedInput,
+    PaddingStrategy,
+)
 
 __all__ = ["LlamaTokenizer", "Llama3Tokenizer"]
 
@@ -281,12 +286,7 @@ from typing import Collection, Dict, List, Optional, Set, Tuple, Union
 
 from ...utils.import_utils import is_tiktoken_available
 from .. import PretrainedTokenizer
-from ..tokenizer_utils_base import (
-    AddedToken,
-    BatchEncoding,
-    EncodedInput,
-    PaddingStrategy,
-)
+from ..tokenizer_utils_base import BatchEncoding, EncodedInput, PaddingStrategy
 
 VOCAB_FILES_NAMES = {"vocab_file": "tokenizer.model"}
 
@@ -326,7 +326,6 @@ class Llama3Tokenizer(PretrainedTokenizer):
         padding_side="left",
         **kwargs,
     ):
-        super().__init__(**kwargs)
         if not is_tiktoken_available():
             raise ValueError("tiktoken is not installed, please install it use: pip install tiktoken")
 
@@ -355,6 +354,9 @@ class Llama3Tokenizer(PretrainedTokenizer):
 
         self.tokenizer = enc  # type: tiktoken.Encoding
 
+        self.add_bos_token = True
+        self.add_eos_token = False
+
         self.bod_id = self.special_tokens[BEGINOFTEXT]
         self.eod_id = self.special_tokens[ENDOFTEXT]
         self.start_header_id = self.special_tokens[IMSTART]
@@ -366,11 +368,19 @@ class Llama3Tokenizer(PretrainedTokenizer):
         if "eos_token_id" in kwargs:
             self.eos_token_id = kwargs["eos_token_id"]
 
+        self.bos_token = BEGINOFTEXT
+        self.eos_token = ENDOFTEXT
+        self.bos_token_id = self.bod_id
+        self.eos_token_id = self.eod_id
+        self.pad_token = self.convert_ids_to_tokens(self.eos_token_id)
+
+        super().__init__(pad_token=self.pad_token, **kwargs)
+
     def __len__(self) -> int:
         return self.tokenizer.n_vocab
 
     def get_vocab(self) -> Dict[bytes, int]:
-        return self.mergeable_ranks
+        return {**self.mergeable_ranks, **self.special_tokens}
 
     def convert_tokens_to_ids(self, tokens: Union[bytes, str, List[Union[bytes, str]]]) -> List[int]:
         ids = []
@@ -386,13 +396,45 @@ class Llama3Tokenizer(PretrainedTokenizer):
                 ids.append(self.mergeable_ranks.get(token))
         return ids
 
+    def convert_ids_to_tokens(self, ids, skip_special_tokens=False):
+        if isinstance(ids, int):
+            return self.decoder[ids]
+        tokens = []
+        for index in ids:
+            index = int(index)
+            if skip_special_tokens and index >= len(self.mergeable_ranks):
+                continue
+            if index in self.decoder:
+                tokens.append(self.decoder[index])
+        return tokens
+
     def _add_tokens(self, new_tokens: Union[List[str], List[AddedToken]], special_tokens: bool = False) -> int:
         if not special_tokens and new_tokens:
             raise ValueError("Adding regular tokens is not supported")
         for token in new_tokens:
             surface_form = token.content if isinstance(token, AddedToken) else token
+
             if surface_form not in SPECIAL_TOKENS:
-                raise ValueError("Adding unknown special tokens is not supported")
+                logger.info(f"adding a special token '{surface_form}'.")
+                token_id = len(self.mergeable_ranks) + len(self.special_tokens)
+                self.special_tokens[surface_form] = token_id
+                self.decoder[token_id] = surface_form
+
+        import tiktoken as tk
+
+        tiktoken = tk
+        enc = tiktoken.Encoding(
+            "Llama3",
+            pat_str=PAT_STR,
+            mergeable_ranks=self.mergeable_ranks,
+            special_tokens=self.special_tokens,
+        )
+        assert (
+            len(self.mergeable_ranks) + len(self.special_tokens) == enc.n_vocab
+        ), f"{len(self.mergeable_ranks) + len(self.special_tokens)} != {enc.n_vocab} in encoding"
+
+        self.tokenizer = enc  # type: tiktoken.Encoding
+
         return 0
 
     def save_vocabulary(self, save_directory: str, **kwargs) -> Tuple[str]:
@@ -467,28 +509,16 @@ class Llama3Tokenizer(PretrainedTokenizer):
     def vocab_size(self):
         return self.tokenizer.n_vocab
 
-    def _convert_id_to_token(self, index: int) -> Union[bytes, str]:
-        """Converts an id to a token, special tokens included"""
-        if index in self.decoder:
-            return self.decoder[index]
-        raise ValueError("unknown ids")
+    def build_inputs_with_special_tokens(self, token_ids_0, token_ids_1=None):
+        bos_token_id = [self.bod_id] if self.add_bos_token else []
+        eos_token_id = [self.eod_id] if self.add_eos_token else []
 
-    def _convert_token_to_id(self, token: Union[bytes, str]) -> int:
-        """Converts a token to an id using the vocab, special tokens included"""
-        if token in self.special_tokens:
-            return self.special_tokens[token]
-        if token in self.mergeable_ranks:
-            return self.mergeable_ranks[token]
-        raise ValueError("unknown token")
+        output = bos_token_id + token_ids_0 + eos_token_id
 
-    def _tokenize(self, text: str, **kwargs):
-        """
-        Converts a string in a sequence of tokens (string), using the tokenizer. Split in words for word-based
-        vocabulary or sub-words for sub-word-based vocabularies (BPE/SentencePieces/WordPieces).
+        if token_ids_1 is not None:
+            output = output + bos_token_id + token_ids_1 + eos_token_id
 
-        Do NOT take care of added tokens.
-        """
-        raise NotImplementedError
+        return output
 
     def _decode(
         self,
@@ -500,7 +530,7 @@ class Llama3Tokenizer(PretrainedTokenizer):
         if isinstance(token_ids, int):
             token_ids = [token_ids]
         if skip_special_tokens:
-            token_ids = [i for i in token_ids if i < self.eod_id]
+            token_ids = [i for i in token_ids if i <= len(self.mergeable_ranks)]
         return self.tokenizer.decode(token_ids, errors=errors or self.errors)
 
     def _pad(

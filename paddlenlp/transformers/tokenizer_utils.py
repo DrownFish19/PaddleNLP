@@ -1018,9 +1018,9 @@ class PretrainedTokenizer(ChatTemplateMixin, PretrainedTokenizerBase):
             if not special_tokens and hasattr(self, "do_lower_case") and self.do_lower_case:
                 token = token.lower()
             if (
-                token != self.unk_token
-                and self.convert_tokens_to_ids(token) == self.convert_tokens_to_ids(self.unk_token)
+                self.convert_tokens_to_ids(token) == self.convert_tokens_to_ids(self.unk_token)
                 and token not in tokens_to_add
+                and token not in self.added_tokens_encoder
             ):
                 tokens_to_add.append(token)
                 if self.verbose:
@@ -1128,12 +1128,12 @@ class PretrainedTokenizer(ChatTemplateMixin, PretrainedTokenizerBase):
                     # Strip white spaces on the left
                     if tok_extended.lstrip and left:
                         tokens[i - 1] = left.rstrip()  # Opposite here
-                else:
-                    # We strip left and right by default
-                    if right:
-                        tokens[i + 1] = right.lstrip()
-                    if left:
-                        tokens[i - 1] = left.rstrip()
+                # else:
+                #     # We strip left and right by default
+                #     if right:
+                #         tokens[i + 1] = right.lstrip()
+                #     if left:
+                #         tokens[i - 1] = left.rstrip()
         # ["This is something", "<special_token_1>", "else"]
         tokenized_text = []
         for token in tokens:
