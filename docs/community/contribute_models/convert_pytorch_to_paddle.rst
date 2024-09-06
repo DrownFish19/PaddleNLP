@@ -101,9 +101,9 @@ PaddleNLP（Paddle框架）和HuggingFace的transformers（PyTorch框架）里�
                 'bert.encoder.layer.0.output.LayerNorm.gamma', 'bert.encoder.layer.0.output.LayerNorm.beta',
                 'bert.encoder.layer.1'...
                 'bert.encoder.layer.2'...
-                .
-                .
-                .
+                ...
+                ...
+                ...
                 'bert.encoder.layer.9'...
                 'bert.encoder.layer.10'...
                 'bert.encoder.layer.11.attention.self.query.weight', 'bert.encoder.layer.11.attention.self.query.bias',
@@ -120,7 +120,7 @@ PaddleNLP（Paddle框架）和HuggingFace的transformers（PyTorch框架）里�
                 'cls.predictions.transform.LayerNorm.beta', 'cls.predictions.decoder.weight',
                 'cls.seq_relationship.weight', 'cls.seq_relationship.bias'])
 
-\**odict_keys**（ordered_dict keys）所显示的是PyTorch模型文件所对应的 ``state dict`` 的keys:
+**odict_keys**（ordered_dict keys）所显示的是PyTorch模型文件所对应的 ``state dict`` 的keys:
 我们仔细观察一下可以发现参数可以分成几大模块：**embeddings** 模块，
 **encoder_layers** 模块, **pooler** 模块和 **cls** 模块。
 
@@ -132,12 +132,12 @@ PaddleNLP（Paddle框架）和HuggingFace的transformers（PyTorch框架）里�
   包括word_embeddings矩阵，position_embeddings矩阵，token_type_embeddings矩阵以及embeddings模块的LayerNorm层参数等。
 - **encoder_layers** 模块
 
-  *'bert.encoder.layer'*开头的各个参数是各encoder层的参数，
+  *'bert.encoder.layer'* 开头的各个参数是各encoder层的参数，
   可以看到 ``'bert-base-uncased'`` 模型一共有12层encoder（编号0-11），每一层encoder的结构都相同。
-  每一层encoder主要由一个*self-attention*模块和一个*feed-forward*模块构成。
-  我们具体来看一下第1层encoder的参数（编号为0，'bert.encoder.layer.0'开头的参数）：
+  每一层encoder主要由一个 *self-attention* 模块和一个 *feed-forward* 模块构成。
+  我们具体来看一下第1层encoder的参数（编号为0，'bert.encoder.layer.0' 开头的参数）：
 
-  首先是*self-attention*模块：
+  首先是 *self-attention* 模块：
 
   * *'attention.self.query'*，*'attention.self.key'* 和 *'attention.self.value'*
     分别代表self-attention结构里面的query矩阵，key矩阵和value矩阵。
@@ -146,9 +146,11 @@ PaddleNLP（Paddle框架）和HuggingFace的transformers（PyTorch框架）里�
 
   接下来是*feed-forward*模块，对应 'intermediate.dense' 和 'output.dense' 开头的参数
   。*feed-forward*之后还有一个*LayerNorm*层，对应的是 'output.LayerNorm' 开头的参数。
+
 - **pooler** 模块
 
-  pooler模块在最后一层encoder之后，是我们对最后一层encoder输出的池化操作，
+  pooler模块在最后一层encoder之后，是我们对最后一层encoder输出的池化操作。
+
 - **cls** 模块
 
   cls模块是我们计算mlm（masked language model）和next sentence prediction（nsp）任务的结构。
@@ -201,8 +203,7 @@ Paddle模型的 ``state dict`` 是通过一个dict来进行存储，可以看到
 
 - 两者的存储是相似的，PyTorch里使用的是python中的ordered_dict来存储模型的参数状态，
   在Paddle中则使用的是python中的dict来来进行存储。
-- 两者的结构也是相似的，都可以分成embeddings，encoder_layer, pooler, cls等
-  模块（当然这也很直观，毕竟两者的模型结构和模型参数是完全一致的）。
+- 两者的结构也是相似的，都可以分成embeddings，encoder_layer, pooler, cls等模块（当然这也很直观，毕竟两者的模型结构和模型参数是完全一致的）。
 - 同时两者也存在一些区别，两者的 ``state dict`` 的keys有一些细微的差异，这是由于模型代码的具体实现的参数命名差异所造成的。
 
 3.3 PyTorch和Paddle的 ``state dict`` 对比
