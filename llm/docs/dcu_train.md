@@ -46,7 +46,7 @@ DCU  Temp   AvgPwr  Fan   Perf  PwrCap  VRAM%  DCU%
 
 **安装方式一：wheel 包安装**
 
-在启动的 docker 容器中，下载并安装飞桨官网发布的 wheel 包。
+在启动的 docker 容器中，下载并安装飞桨官网发布的 wheel 包。飞桨当前发布版本为针对 Z100和 Z100L 预编译，其他型号请参考**安装方式二**自行编译安装 Paddle。
 ```shell
 python -m pip install --pre paddlepaddle-dcu -i https://www.paddlepaddle.org.cn/packages/nightly/dcu/
 ```
