@@ -693,8 +693,10 @@ class Qwen2MoeSparseMoEBlock(nn.Layer):
         self.gate = nn.Linear(config.hidden_size, self.num_experts, bias_attr=False)
         self.experts = nn.LayerList([Qwen2MoeMLP(config) for _ in range(self.num_experts)])
 
-        self.shared_expert = Qwen2MoeMLP(config, is_shared=True)
-        self.shared_expert_gate = nn.Linear(config.hidden_size, 1, bias_attr=False)
+        self.use_shared_expert = config.use_shared_expert
+        if self.use_shared_expert:
+            self.shared_expert = Qwen2MoeMLP(config, is_shared=True)
+            self.shared_expert_gate = nn.Linear(config.hidden_size, 1, bias_attr=False)
 
     def forward(self, hidden_states):
         batch_size, seq_len, hidden_dim = hidden_states.shape
@@ -738,10 +740,11 @@ class Qwen2MoeSparseMoEBlock(nn.Layer):
                 final_hidden_states, top_x, 0, current_hidden_states.astype(hidden_states.dtype)
             )
 
-        shared_expert_output = self.shared_expert(hidden_states)
-        shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
+        if self.use_shared_expert:
+            shared_expert_output = self.shared_expert(hidden_states)
+            shared_expert_output = F.sigmoid(self.shared_expert_gate(hidden_states)) * shared_expert_output
 
-        final_hidden_states = final_hidden_states + shared_expert_output
+            final_hidden_states = final_hidden_states + shared_expert_output
 
         final_hidden_states = final_hidden_states.reshape([batch_size, seq_len, hidden_dim])
         return final_hidden_states, router_logits
@@ -979,16 +982,17 @@ class Qwen2MoePretrainedModel(PretrainedModel):
                         final_actions[newkey2] = action
 
             # Add tp split for shared expert params.
-            base_actions = {
-                "layers.0.mlp.shared_expert.gate_proj.weight": partial(fn, is_column=True),
-                "layers.0.mlp.shared_expert.up_proj.weight": partial(fn, is_column=True),
-                "layers.0.mlp.shared_expert.down_proj.weight": partial(fn, is_column=False),
-            }
-            for key, action in base_actions.items():
-                if "layers.0." in key:
-                    for i in range(num_layers):
-                        final_actions[key.replace("layers.0.", f"layers.{i}.")] = action
-                final_actions[key] = action
+            if config.use_shared_expert:
+                base_actions = {
+                    "layers.0.mlp.shared_expert.gate_proj.weight": partial(fn, is_column=True),
+                    "layers.0.mlp.shared_expert.up_proj.weight": partial(fn, is_column=True),
+                    "layers.0.mlp.shared_expert.down_proj.weight": partial(fn, is_column=False),
+                }
+                for key, action in base_actions.items():
+                    if "layers.0." in key:
+                        for i in range(num_layers):
+                            final_actions[key.replace("layers.0.", f"layers.{i}.")] = action
+                    final_actions[key] = action
 
             return final_actions
 
