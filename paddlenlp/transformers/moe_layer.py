@@ -1,4 +1,6 @@
 # Copyright (c) 2024 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) Microsoft Corporation.
+# Copyright (c) Facebook, Inc. and its affiliates. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -173,6 +175,7 @@ class MoELayer(nn.Layer):
     def __init__(
         self,
         gate: nn.Layer,
+        capacity: int,
         experts: List[nn.Layer],
         layer_idx,
         group: Group = None,
@@ -182,9 +185,20 @@ class MoELayer(nn.Layer):
     ):
         super().__init__()
         self.gate = gate
-        self.layer_idx = layer_idx
-        self.recompute = recompute
-        logger.info(f"using moe recompute={recompute}")
+
+        self.num_experts = len(experts)
+        self.experts = experts
+        self.capacity = capacity
+
+        self.group = group
+        self.all_to_all_dropout = all_to_all_dropout
+
+        self.enable_recompute = False
+
+        self.expert_parallel_degree = 1 if dist.get_world_size(self.group) < 1 else dist.get_world_size(group)
+        is_dummy_moe = dist.get_world_size(group) == 1
+        self.rank = 0 if dist.get_rank(self.group) < 0 else dist.get_rank(self.group)
+
         for p in self.gate.parameters():
             p.is_gate = True
         if type(experts) == nn.LayerList:
@@ -203,14 +217,10 @@ class MoELayer(nn.Layer):
                     p.no_sync = not is_dummy_moe
                     # logger.info(f"expert param={p.name}, no-sync={p.no_sync}")
 
-        self.world_size = dist.get_world_size(group)
-        self.rank = dist.get_rank(self.group)
-        if self.world_size < 1:
-            self.world_size = 1
-        if self.rank < 0:
-            self.rank = 0
-
-        self.num_local_experts = moe_num_experts // self.world_size
+        assert (
+            self.num_experts // self.expert_parallel_degree == 0
+        ), f"num_experts must be divisible by expert_parallel_degree, got: {self.num_experts} vs {self.expert_parallel_degree}"
+        self.num_local_experts = self.num_experts // self.expert_parallel_degree
 
     def forward(self, input):
         true_experts = self.experts[self.rank * self.num_local_experts : (self.rank + 1) * self.num_local_experts]
@@ -238,39 +248,34 @@ class MoELayer(nn.Layer):
             expert_output = paddle.stack(expert_outputs, axis=1)  # [ecm]
             return expert_output
 
-        assert self.gate is not None
-        if hasattr(self, "rng") and self.rng.random() < self.all_to_all_dropout:
-            orig_shape_2 = input.shape
-            input = input.reshape([self.world_size, self.num_local_experts, -1, input.shape[-1]])
-            output = fwdfn(input)
-            output += self.gate.weight.sum() * 0.0  # hack for grad
-            output = output.reshape(orig_shape or orig_shape_2)  # [e*1,c,m]
-            return output, None, 0
+        # Initial implementation -> Reshape into S tokens by dropping sequence dimension.
+        # Reshape into G groups so that each group can distribute tokens equally
+        # group_size = kwargs['group_size'] if 'group_size' in kwargs.keys() else 1
+        reshaped_input = input[0].reshape(-1, d_model)
+        self.l_aux, combine_weights, dispatch_mask, self.exp_counts = self.gate(reshaped_input)
+        # self.l_aux       :
+        # combine_weights  : sec
+        # dispatch_mask    : sec
+        # self.exp_counts  :
+        dispatched_input = paddle.einsum("sec,sm->ecm", paddle.cast(dispatch_mask, input.dtype), reshaped_input)
 
-        capacity, dispatch_mask, combine_weights, scatter_index, router_loss = self.gate(input)
-        self.l_aux, combine_weights, dispatch_mask, self.exp_counts = self.gate(reshaped_input, input[1])
+        # capacity, dispatch_mask, combine_weights, scatter_index, router_loss = self.gate(input)
+        # self.l_aux, combine_weights, dispatch_mask, self.exp_counts = self.gate(reshaped_input, input[1])
 
-        if self.world_size > 1:
+        if self.expert_parallel_degree > 1:
             dispatched_input = _AllToAll.apply(dispatched_input, self.group)
-        dispatched_input = dispatched_input.reshape([self.world_size * self.num_local_experts, capacity, d_model])
-        expert_output = (
-            recompute(fwdfn, dispatched_input) if self.recompute and self.training else fwdfn(dispatched_input)
+
+        # Re-shape after all-to-all: ecm -> gecm
+        dispatched_input = dispatched_input.reshape(
+            [self.expert_parallel_degree * self.num_local_experts, -1, d_model]
         )
-        d_model_out = expert_output.shape[-1]
+        expert_output = fwdfn(dispatched_input)
 
-        if self.world_size > 1:
+        # Re-shape before drop_tokens: gecm -> ecm
+        expert_output = expert_output.reshape(self.expert_parallel_degree * self.num_local_experts, -1, d_model)
+        if self.expert_parallel_degree > 1:
             expert_output = _AllToAll.apply(expert_output, self.group)  # 拿到不同device上的expert计算结果
+        combined_output = paddle.einsum("sec,ecm->sm", combine_weights.type_as(input[0]), expert_output)
 
-        expert_output = expert_output.reshape(
-            [self.world_size * self.num_local_experts * capacity, d_model_out]
-        )  # [e * 1, c, m]
-        combined_output = combining(expert_output, combine_weights, scatter_index)
-
-        if orig_shape:
-            combined_output = combined_output.reshape(
-                orig_shape[:-1]
-                + [
-                    d_model_out,
-                ]
-            )
-        return combined_output, combine_weights, router_loss
+        a = combined_output.reshape(input[0].shape)
+        return a
