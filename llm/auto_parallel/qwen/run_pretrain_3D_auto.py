@@ -40,12 +40,15 @@ from paddlenlp.transformers import (
     LinearAnnealingWithWarmupDecay,
     QWenConfig,
     QWenForCausalLM3DAuto,
+    QWenForCausalLMNet,
     QWenPretrainingCriterionAuto,
+    QWenPretrainingCriterionNet,
 )
 from paddlenlp.utils.log import logger
 
 MODEL_CLASSES = {
     "qwen": (QWenConfig, QWenForCausalLM3DAuto, QWenPretrainingCriterionAuto),
+    "qwen_network": (QWenConfig, QWenForCausalLMNet, QWenPretrainingCriterionNet),
 }
 
 from paddlenlp.data.causal_dataset import (
@@ -53,14 +56,7 @@ from paddlenlp.data.causal_dataset import (
     check_data_split,
     print_rank_0,
 )
-
-
-def add_start_docstrings(*docstr):
-    def docstring_decorator(fn):
-        fn.__doc__ = "".join(docstr) + (fn.__doc__ if fn.__doc__ is not None else "")
-        return fn
-
-    return docstring_decorator
+from paddlenlp.trainer.utils.doc import add_start_docstrings
 
 
 @dataclass
@@ -94,9 +90,6 @@ class PreTrainingArguments(AutoTrainingArguments):
         default="1F1B", metadata={"help": "The pipeline schedule mode, support FThenB, 1F1B, VPP and Eager-1F1B."}
     )
     sr: Optional[int] = field(default=0, metadata={"help": "The count of chunks without recompute."})
-    refined_ops_patterns: Optional[List[str]] = field(
-        default=None, metadata={"help": "The pattern of refined recompute."}
-    )
     virtual_pipeline_seg_method: str = field(
         default="LlamaDecoderLayerAuto", metadata={"help": "The seg method of spliting pp layer for virtual pipeline."}
     )
@@ -258,6 +251,8 @@ class ModelArguments:
         default=False,
         metadata={"help": "recompute_use_reentrant"},
     )
+    hidden_dropout_prob: float = field(default=0.1, metadata={"help": "The hidden dropout prob."})
+    attention_probs_dropout_prob: float = field(default=0.1, metadata={"help": "The attention hidden dropout prob."})
 
 
 def create_pretrained_dataset(
@@ -363,6 +358,7 @@ def get_train_data_file(args):
 class PretrainingTrainer(AutoTrainer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+        self.is_pretraining = True
 
     def _wrap_for_dist_loader(self, train_dataloader):
         dist_loader = super()._wrap_for_dist_loader(train_dataloader)
@@ -550,8 +546,9 @@ def main():
         if training_args.bf16:
             dtype = "bfloat16"
 
-    model = model_class.from_config(config, dtype=dtype)
-    criterion = criterion_class(config)
+    with paddle.LazyGuard():
+        model = model_class.from_config(config, dtype=dtype)
+        criterion = criterion_class(config)
 
     # load_model(model)
     # shard_model(model)
@@ -559,7 +556,11 @@ def main():
     # Create the learning_rate sheduler and optimizer
     if training_args.decay_steps is None:
         training_args.decay_steps = training_args.max_steps
-    warmup_steps = training_args.warmup_ratio * training_args.max_steps
+
+    if training_args.warmup_steps > 0:
+        warmup_steps = training_args.warmup_steps
+    else:
+        warmup_steps = training_args.warmup_ratio * training_args.max_steps
 
     lr_scheduler = None
     if training_args.lr_scheduler_type.value == "cosine":

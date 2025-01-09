@@ -22,9 +22,14 @@ import paddle
 import paddle.distributed as dist
 import paddle.nn as nn
 from paddle.distributed import fleet
+from paddle.distributed.auto_parallel.intermediate.parallelize import (
+    parallelize_model,
+    parallelize_optimizer,
+)
 from tqdm.auto import tqdm
 
 from paddlenlp.trainer import Trainer
+from paddlenlp.transformers.model_utils import PretrainedModel
 
 from ..utils.batch_sampler import DistributedBatchSampler as NlpDistributedBatchSampler
 from ..utils.log import logger
@@ -65,6 +70,51 @@ class AutoTrainer(Trainer):
                     return loss
 
                 kwargs.update({"criterion": loss_func})
+
+        sequence_parallel = False
+        if kwargs.get("model_args", None) is not None:
+            model_args = kwargs.pop("model_args")
+            if hasattr(model_args, "sequence_parallel"):
+                sequence_parallel = model_args.sequence_parallel
+
+        if kwargs.get("args", None) is not None and kwargs["args"].use_intermediate_api:
+            model = kwargs.get("model", None)
+            assert model is not None
+            assert isinstance(model, PretrainedModel), f" AutoTrainer only support pretrained models,but got {model}"
+            for param in model.parameters():
+                assert not param._is_initialized(), "intermediate_api needs lazy init"
+
+            auto_dist_degree = {
+                "tensor_parallel": kwargs["args"].tensor_parallel_degree > 1,
+                "sequence_parallel": sequence_parallel,
+                "pipeline_parallel": kwargs["args"].pipeline_parallel_degree > 1,
+                "data_sharding_parallel": kwargs["args"].dataset_world_size > 1,
+                "sharding": kwargs["args"].sharding,
+                "sharding_mesh_dim": kwargs["args"].sharding_parallel_mesh_dimension,
+            }
+            auto_dist_config = model._generate_auto_dist_config(auto_dist_degree)
+            self.auto_dist_config = auto_dist_config
+
+            model = parallelize_model(
+                model,
+                config=self.auto_dist_config,
+            )
+
+            kwargs["model"] = model
+
+        model = kwargs["model"]
+        for param in model.parameters():
+            if not param._is_initialized():
+                try:
+                    param.initialize()
+                except Exception as e:
+                    # NOTE(zhangwl):maybe param is not initialized and param init_func is set in later.user need set_init_func before auto_trainer
+                    logger.warning(
+                        f"AutoTrainer requires all parameters to be initialized when auto_trainer init, but failed to initialize parameter {param.name} {param}.\n"
+                        + "Please check param init func.\n"
+                        + f"The original exception message is:\n{str(e)}"
+                    )
+        kwargs["model"] = model
 
         super().__init__(*args, **kwargs)
         assert self.args.enable_auto_parallel
@@ -115,26 +165,48 @@ class AutoTrainer(Trainer):
         return dist_loader
 
     def _wrap_for_auto(self, model, train_dataloader):
+        logger.info(f"Wrapping model for auto parallel using intermediate api {self.args.use_intermediate_api} ")
         dist_loader = self._wrap_for_dist_loader(train_dataloader)
 
-        if ShardingOption.SHARD_OP in self.args.sharding:
-            self.optimizer = dist.shard_optimizer(
-                self.optimizer, dist.ShardingStage1(), self.args.gradient_accumulation_steps
-            )
-        elif ShardingOption.SHARD_GRAD_OP in self.args.sharding:
-            self.optimizer = dist.shard_optimizer(
-                self.optimizer, dist.ShardingStage2(), self.args.gradient_accumulation_steps
-            )
-        elif ShardingOption.FULL_SHARD in self.args.sharding:
-            self.optimizer = dist.shard_optimizer(
-                self.optimizer, dist.ShardingStage3(), self.args.gradient_accumulation_steps
+        if self.args.use_intermediate_api:
+            assert self.auto_dist_config is not None
+            self.optimizer = parallelize_optimizer(
+                self.optimizer,
+                config=self.auto_dist_config,
             )
         else:
-            self.optimizer = dist.shard_optimizer(self.optimizer, None, self.args.gradient_accumulation_steps)
+            sharding_parallel_mesh_dimension = self.args.sharding_parallel_mesh_dimension
+            if ShardingOption.SHARD_OP in self.args.sharding:
+                self.optimizer = dist.shard_optimizer(
+                    self.optimizer,
+                    dist.ShardingStage1(sharding_mesh_dim=sharding_parallel_mesh_dimension),
+                    self.args.gradient_accumulation_steps,
+                )
+            elif ShardingOption.SHARD_GRAD_OP in self.args.sharding:
+                self.optimizer = dist.shard_optimizer(
+                    self.optimizer,
+                    dist.ShardingStage2(sharding_mesh_dim=sharding_parallel_mesh_dimension),
+                    self.args.gradient_accumulation_steps,
+                )
+            elif ShardingOption.FULL_SHARD in self.args.sharding:
+                self.optimizer = dist.shard_optimizer(
+                    self.optimizer,
+                    dist.ShardingStage3(sharding_mesh_dim=sharding_parallel_mesh_dimension),
+                    self.args.gradient_accumulation_steps,
+                )
+            else:
+                self.optimizer = dist.shard_optimizer(self.optimizer, None, self.args.gradient_accumulation_steps)
 
         if self.args.to_static:
             unified_strategy = dist.Strategy()
             unified_strategy._from_legacy_strategy(self.args.strategy)
+
+            # same logic as autocast_smart_context_manager() in trainer.py
+            if self.enable_autocast_context_manager:
+                unified_strategy.amp.custom_black_list.extend(["reduce_sum", "c_softmax_with_cross_entropy"])
+                if self.args.fp16_opt_level == "O2":
+                    unified_strategy.amp.custom_white_list.extend(["lookup_table", "lookup_table_v2"])
+
             # dist.to_static() obtains the input spec information through next(dataloader), but this has side effects
             # on the passed-in dataloader, altering the state of the sampler of the dataloader. In some cases, once
             # the state of the sampler is changed, it cannot be reverted. Therefore, a temporary dataloader is
@@ -156,9 +228,10 @@ class AutoTrainer(Trainer):
                 master_grad=self.args.amp_master_grad,
                 excluded_layers=QuantizationLinear,
             )
+        self.enable_autocast_context_manager = True
+
         if args.to_static:
             return
-        self.enable_autocast_context_manager = True
         self.do_grad_scaling = True if self.args.fp16 else False
         self.scaler = dist.shard_scaler(paddle.amp.GradScaler(init_loss_scaling=self.args.scale_loss))
 

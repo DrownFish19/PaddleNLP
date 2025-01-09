@@ -14,9 +14,10 @@
 #pragma once
 
 #include <cuda_bf16.h>
+#include <cuda_fp8.h>
 #include <cuda_runtime.h>
 #include "mem_util.cuh"
-
+    
 struct AppendAttnMetaData {
   int batch_size;
   int block_size;
@@ -48,6 +49,11 @@ struct cascade_attn_type_traits<phi::dtype::bfloat16> {
 template <>
 struct cascade_attn_type_traits<phi::dtype::float16> {
   using type = half;
+};
+
+template <>
+struct cascade_attn_type_traits<phi::dtype::float8_e4m3fn> {
+  using type = __nv_fp8_e4m3;
 };
 
 template <typename T>
@@ -272,7 +278,7 @@ __forceinline__ __host__ __device__ void vec_cast<nv_bfloat16, float>(
       break;                                       \
     }                                              \
     default: {                                     \
-      PD_THROW("not support the head_dim");        \
+      PD_THROW("not support the head_dim: ", head_dim);        \
     }                                              \
   }
 

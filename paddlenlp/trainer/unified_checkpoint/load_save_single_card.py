@@ -19,11 +19,6 @@ import os
 
 import paddle
 
-try:
-    from paddle.base import core
-except:
-    core = None
-
 from paddlenlp.peft import LoRAModel, PrefixModelForCausalLM
 from paddlenlp.transformers.model_utils import (
     _load_state_dict_into_model,
@@ -66,13 +61,13 @@ def save_file_sync(state_dict, path):
     for k in list(state_dict.keys()):
         if isinstance(state_dict[k], paddle.Tensor):
             state_dict[k] = state_dict.pop(k).cpu().numpy()
-        safe_save_file(state_dict, path, metadata={"format": "np"})
+    safe_save_file(state_dict, path, metadata={"format": "np"})
 
 
 def save_single_card_checkpoint(model_to_save, output_dir):
     """Save checkpoint for non-distributed environment."""
 
-    state_dict = get_expected_state_dict(model_to_save)
+    state_dict = get_expected_state_dict(model_to_save, concat_additional_adapter=True)
     if isinstance(model_to_save, LoRAModel) or isinstance(model_to_save, PrefixModelForCausalLM):
         weight_filename = "peft_model-00001-of-00001.safetensors"
         index_filename = SAFE_PEFT_WEIGHTS_INDEX_NAME
@@ -120,7 +115,7 @@ def save_single_card_optimizer(model, optimizer, output_dir):
     fp32_weight = {}
     for k, v in state_dict.items():
         static2struct_name_mappings[v.name] = k
-        if master_weights is not None and v.dtype == core.VarDesc.VarType.FP32:
+        if master_weights is not None and v.dtype == paddle.float32:
             fp32_weight[k] = v
 
     # rename optimizer param
@@ -226,10 +221,12 @@ def load_single_card_optimizer(model, optimizer, resume_from_checkpoint: str):
         key_name = key.split("/")
         static_name = struct2static_name_mappings[key_name[0]]
         if has_master_weights:
-            if model_state_dict[key_name[0]].dtype != core.VarDesc.VarType.FP32:
+            if model_state_dict[key_name[0]].dtype != paddle.float32:
                 key_name = "_".join([static_name, FP32_MASTER, key_name[1]])
             else:
                 key_name = "_".join([static_name, key_name[1]])
+        else:
+            key_name = "_".join([static_name, key_name[1]])
         returned_optim_state_dict[key_name] = state_dict_optim.pop(key)
         returned_optim_state_dict[key_name].name = key_name
     if has_master_weights:

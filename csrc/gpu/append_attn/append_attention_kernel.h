@@ -49,9 +49,9 @@ void CascadeAppendAttentionC16Kernel(
     const int block_shape_q,
     const int max_seq_len,
     const int max_dec_len,
+    const float quant_max_bound,
+    const float quant_min_bound,
     const float in_scale,
-    const int max_partition_size,
-    const int encoder_max_partition_size,
     const int speculate_max_draft_token_num,
     const bool causal,
     const bool is_decoder,
@@ -92,9 +92,9 @@ void CascadeAppendAttentionC8Kernel(
     const int block_shape_q,
     const int max_seq_len,
     const int max_dec_len,
+    const float quant_max_bound,
+    const float quant_min_bound,
     const float in_scale,
-    const int max_partition_size,
-    const int encoder_max_partition_size,
     const int speculate_max_draft_token_num,
     const bool causal,
     const bool is_decoder,
@@ -135,9 +135,9 @@ void CascadeAppendAttentionC4Kernel(
     const int block_shape_q,
     const int max_seq_len,
     const int max_dec_len,
+    const float quant_max_bound,
+    const float quant_min_bound,
     const float in_scale,
-    const int max_partition_size,
-    const int encoder_max_partition_size,
     const int speculate_max_draft_token_num,
     const bool causal,
     const bool is_decoder,
@@ -179,9 +179,9 @@ void CascadeAppendAttentionKernel(
     const int block_shape_q,
     const int max_seq_len,
     const int max_dec_len,
+    const float quant_max_bound,
+    const float quant_min_bound,
     const float in_scale,
-    const int max_partition_size,
-    const int encoder_max_partition_size,
     const int speculate_max_draft_token_num,
     const bool causal,
     const bool is_decoder,
@@ -212,9 +212,9 @@ void CascadeAppendAttentionKernel(
                                              block_shape_q,
                                              max_seq_len,
                                              max_dec_len,
+                                             quant_max_bound,
+                                             quant_min_bound,
                                              in_scale,
-                                             max_partition_size,
-                                             encoder_max_partition_size,
                                              speculate_max_draft_token_num,
                                              causal,
                                              is_decoder,
@@ -245,9 +245,9 @@ void CascadeAppendAttentionKernel(
                                             block_shape_q,
                                             max_seq_len,
                                             max_dec_len,
+                                            quant_max_bound,
+                                            quant_min_bound,
                                             in_scale,
-                                            max_partition_size,
-                                            encoder_max_partition_size,
                                             speculate_max_draft_token_num,
                                             causal,
                                             is_decoder,
@@ -278,9 +278,9 @@ void CascadeAppendAttentionKernel(
                                             block_shape_q,
                                             max_seq_len,
                                             max_dec_len,
+                                            quant_max_bound,
+                                            quant_min_bound,
                                             in_scale,
-                                            max_partition_size,
-                                            encoder_max_partition_size,
                                             speculate_max_draft_token_num,
                                             causal,
                                             is_decoder,
@@ -292,4 +292,11 @@ void CascadeAppendAttentionKernel(
         "cache_quant_type_str should be one of [none, cache_int8, "
         "cache_int4_zp]");
   }
+}
+
+inline uint32_t get_max_partition_size(int bsz) {
+    static const char* max_partition_size_env = std::getenv("FLAGS_cascade_attention_max_partition_size");
+    static const uint32_t max_partition_size =
+            max_partition_size_env == nullptr ? 0 : std::stoul(std::string(max_partition_size_env));
+    return (max_partition_size != 0 ? max_partition_size : (bsz == 1 ? 128 : 512));
 }
