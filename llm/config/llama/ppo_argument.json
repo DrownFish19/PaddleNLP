@@ -1,11 +1,10 @@
 {
-    "train_datasets": "my-dataset-name::/root/paddlejob/workspace/env_run/liujihua/PaddleNLP/5ppl_train.jsonl",
-    "eval_datasets": "my-dataset-name::/root/paddlejob/workspace/env_run/liujihua/PaddleNLP/5ppl_train.jsonl",
-    "ptx_datasets": "my-dataset-name::/root/paddlejob/workspace/env_run/liujihua/PaddleNLP/5ppl_train.jsonl",
+    "train_datasets": "PKU-SafeRLHF/train",
+    "eval_datasets": "PKU-SafeRLHF/test",
+    "ptx_datasets": "alpaca",
     "actor_model_name_or_path": "PKU-Alignment/alpaca-7b-reproduced",
     "reward_model_name_or_path": "PKU-Alignment/beaver-7b-v1.0-reward",
     "output_dir": "checkpoints/llama-ppo",
-    "logging_dir": "log",
     "max_length": 2048,
     "use_fusemt": 1,
     "use_flash_attention": 1,
@@ -44,6 +43,7 @@
     "clip_range_value": 5.0,
     "ptx_coeff": 16.0,
     "logging_steps": 1,
+    "logging_dir": "vdl_log",
     "evaluation_strategy": "no",
     "per_device_eval_batch_size": 16,
     "eval_steps": 10000,
@@ -58,7 +58,7 @@
     "disable_tqdm": 1,
     "sharding_parallel_degree": 1,
     "sharding": "stage1",
-    "tensor_parallel_degree": 1,
+    "tensor_parallel_degree": 8,
     "tensor_parallel_output": 0,
     "pipeline_parallel_degree": 1,
     "pipeline_parallel_config": "disable_p2p_cache_shape",
@@ -74,7 +74,5 @@
     "use_fused_head_and_loss_fn": 0,
     "fused_linear":1,
     "autotuner_benchmark": 0,
-    "skip_profile_timer": 1,
-    "rl_algorithm": "grpo",
-    "use_rm_server": false
+    "skip_profile_timer": 1
 }
