@@ -78,6 +78,7 @@ from paddlenlp.trainer.trainer import (
     speed_metrics,
 )
 from paddlenlp.trainer.trainer_utils import TrainOutput
+from paddlenlp.trainer.utils import distributed_concat
 from paddlenlp.transformers import (
     CosineAnnealingWithWarmupDecay,
     LinearAnnealingWithWarmupDecay,
@@ -132,6 +133,7 @@ class StepTrainer(Trainer):
         )
         # criterion is only used for non-PipelineParallel models. criterion is
         # included in model for PipelineParallel.
+        self.info_buffer = {}
         if getattr(self, "loss_cls", None) and self.criterion is None:
             self.criterion = self.create_criterion()
 
@@ -150,7 +152,7 @@ class StepTrainer(Trainer):
         whose label arguments are merged into one argument, this is useful to
         PipelineParallel and trainer.criterion which limit loss format.
         """
-        criterion = create_loss(self.loss_cls, self.model.config, self.args, merge_labels=True)
+        criterion = create_loss(self.loss_cls, self.model.config, self.args, self.info_buffer, merge_labels=True)
         return criterion
 
     def loss_identifier(self, inputs: Dict) -> str:
@@ -234,7 +236,8 @@ class StepTrainer(Trainer):
             # should be called after model is wrapped since the model field should
             # use model_wrapped.
 
-            assert self.model is not self.model_wrapped
+            if paddle.distributed.get_world_size() > 1:
+                assert self.model is not self.model_wrapped
             self.train_step_vars = {
                 # meaningless vars can pass from outter, dummy value is enough
                 "epoch": 0,  # meaningless for step training
@@ -788,9 +791,8 @@ class PPOMetric:
 
         self.counter += 1
         if self.counter == self.freq:
-            from paddlenlp.trainer.utils import distributed_concat
+            metrics = distributed_concat(self.metrics) if paddle.distributed.get_world_size() > 1 else self.metrics
 
-            metrics = distributed_concat(self.metrics)
             out_metrics = {}
             if self.use_stack:
                 mean_metric = metrics.mean(0)
@@ -1004,7 +1006,6 @@ class PPOTrainer(Trainer):
                 ),  # workaround for pipeline parallel model check
             },
         ):
-
             self.reference_trainer = StepTrainer(
                 reference_model,
                 criterion,
@@ -1235,14 +1236,13 @@ class PPOTrainer(Trainer):
                 generated_seq = self.generate(prompt_only_batch, do_eval=True)[0]["input_ids"]
 
             if self._model_config.sequence_parallel:
+                # pad to max_sequence_length
                 seq = self.tokenizer.pad(
                     {"input_ids": [s for s in generated_seq]},
                     padding="max_length",
                     max_length=self._model_config.max_sequence_length,
                     return_attention_mask=False,
-                )[
-                    "input_ids"
-                ]  # pad to max_sequence_length
+                )["input_ids"]
             else:
                 seq = generated_seq
 
@@ -1267,14 +1267,13 @@ class PPOTrainer(Trainer):
                     )
                     reward_position_ids = make_position_ids(reward_attention_mask)
 
+                # .end_scores
                 reward_score = self.reward_model(
                     reward_input_ids,
                     attention_mask=reward_attention_mask,
                     position_ids=reward_position_ids,
                     # return_dict=True,
-                )[
-                    1
-                ]  # .end_scores
+                )[1]
             else:
                 prompt_len = inputs["input_ids"].shape[-1]
                 if "label_ids" not in inputs:
@@ -1552,12 +1551,12 @@ class PPOTrainer(Trainer):
                 self.prompt_only_dataloader,
                 itertools.cycle(self.ptx_dataloader),
             ):
-
                 # generate batches
                 self.set_eval()
 
-                with ema(self.policy_trainer), (
-                    ema(self.value_trainer) if self.args.rl_algorithm == "ppo" else contextlib.nullcontext()
+                with (
+                    ema(self.policy_trainer),
+                    ema(self.value_trainer) if self.args.rl_algorithm == "ppo" else contextlib.nullcontext(),
                 ):
                     with guard_set_args(self._model_config, {"use_fused_head_and_loss_fn": False}):
                         rl_batches = self.split_rl_micro_batches(prompt_only_batch)
@@ -1708,34 +1707,40 @@ class PPOTrainer(Trainer):
 
         # ##### trainging data and related num setting #####
         # TODO(guosheng): remove the binding method get_collator of dataset
-        with guard_set_args(
-            args,
-            {"per_device_train_batch_size": self.args.per_device_prompt_batch_size},
-        ), guard_set_args(
-            self,
-            {
-                "train_dataset": self.train_dataset,
-                "data_collator": self.train_dataset.get_collator(),
-            },
+        with (
+            guard_set_args(
+                args,
+                {"per_device_train_batch_size": self.args.per_device_prompt_batch_size},
+            ),
+            guard_set_args(
+                self,
+                {
+                    "train_dataset": self.train_dataset,
+                    "data_collator": self.train_dataset.get_collator(),
+                },
+            ),
         ):
             train_dataloader = self.prompt_only_dataloader = self.get_train_dataloader()
 
         if self.use_ptx:
-            with guard_set_args(
-                args,
-                {
-                    "per_device_train_batch_size": (
-                        1
-                        if getattr(self.ptx_dataset, "is_intokens", False)
-                        else self.args.per_device_prompt_batch_size * self.args.num_return_sequences
-                    )
-                },
-            ), guard_set_args(
-                self,
-                {
-                    "train_dataset": self.ptx_dataset,
-                    "data_collator": self.ptx_dataset.get_collator(),
-                },
+            with (
+                guard_set_args(
+                    args,
+                    {
+                        "per_device_train_batch_size": (
+                            1
+                            if getattr(self.ptx_dataset, "is_intokens", False)
+                            else self.args.per_device_prompt_batch_size * self.args.num_return_sequences
+                        )
+                    },
+                ),
+                guard_set_args(
+                    self,
+                    {
+                        "train_dataset": self.ptx_dataset,
+                        "data_collator": self.ptx_dataset.get_collator(),
+                    },
+                ),
             ):
                 self.ptx_dataloader = self.get_train_dataloader()
         else:
@@ -1883,14 +1888,10 @@ class PPOTrainer(Trainer):
 
             best_model_checkpoint = json.loads(self.state.best_model_checkpoint)
 
-            logger.info(
-                f"Loading best model from {best_model_checkpoint['value']}" f"(score: {self.state.best_metric})."
-            )
+            logger.info(f"Loading best model from {best_model_checkpoint['value']}(score: {self.state.best_metric}).")
             self.load_best_ckpt(best_model_checkpoint["value"], self.value_trainer)
 
-            logger.info(
-                f"Loading best model from {best_model_checkpoint['policy']}" f"(score: {self.state.best_metric})."
-            )
+            logger.info(f"Loading best model from {best_model_checkpoint['policy']}(score: {self.state.best_metric}).")
             self.load_best_ckpt(best_model_checkpoint["policy"], self.policy_trainer)
 
         metrics = speed_metrics(
@@ -1967,7 +1968,6 @@ class PPOTrainer(Trainer):
                 None.
         """
         if self.control.should_log and tr_loss is not None:
-
             logs: Dict[str, float] = {}
             # use_ptx would double the gradient_accumulation_steps which causes
             # policy_loss and ptx_loss reduced by half. Moreover, ptx_loss should
@@ -2477,14 +2477,12 @@ class PPOTrainer(Trainer):
             if self.args.num_return_sequences > 1:
                 label_ids = label_ids.repeat_interleave(self.args.num_return_sequences, axis=0)
 
-        if self.args.num_return_sequences > 1:
-            sequences = sequences.reshape(
-                [input_ids.shape[0] // self.args.num_return_sequences, self.args.num_return_sequences, -1]
-            )
+        sequences = sequences.reshape(
+            [input_ids.shape[0] // self.args.num_return_sequences, self.args.num_return_sequences, -1]
+        )
         if do_eval:
             self.args.num_return_sequences = train_num_return_sequences
             sequences = sequences.transpose([1, 0, 2])
-
         # prompt, sequence, attention_mask
         return [
             {
@@ -2624,14 +2622,13 @@ class PPOTrainer(Trainer):
                 reward_attention_mask = attention_mask
                 reward_position_ids = position_ids
 
+            # .end_scores
             reward_score = self.reward_model(
                 reward_input_ids,
                 attention_mask=reward_attention_mask,
                 position_ids=reward_position_ids,
                 # return_dict=True,
-            )[
-                1
-            ]  # .end_scores
+            )[1]
         else:
             prompt_len = kwargs["prompt"].shape[-1]
             if "label_ids" not in kwargs:
@@ -2646,14 +2643,13 @@ class PPOTrainer(Trainer):
         if self.args.rl_algorithm == "grpo":
             return {"rewards": reward_score}
 
+        # .scores
         reward_value = self.reward_critic_model(
             input_ids,
             attention_mask=attention_mask,
             position_ids=position_ids,
             # return_dict=True,
-        )[
-            0
-        ]  # .scores
+        )[0]
         reward_value = reward_value.squeeze(axis=-1)
         reward_value = reward_value[:, :-1]
 
@@ -2714,18 +2710,21 @@ class PPOTrainer(Trainer):
             batch_rewards = paddle.concat(batch_rewards_list, axis=0)
             batch_rewards = batch_rewards.cast(paddle.float32)
 
-            hcg = fleet.get_hybrid_communicate_group()
-            sd_group = hcg.get_sharding_parallel_group()
-            dp_group = hcg.get_data_parallel_group()
+            try:
+                hcg = fleet.get_hybrid_communicate_group()
+                sd_group = hcg.get_sharding_parallel_group()
+                dp_group = hcg.get_data_parallel_group()
 
-            if sd_group.nranks > 1:
-                all_gather_batch_rewards = []
-                dist.all_gather(all_gather_batch_rewards, batch_rewards, group=sd_group)
-                batch_rewards = paddle.flatten(paddle.stack(all_gather_batch_rewards))
-            if dp_group.nranks > 1:
-                all_gather_batch_rewards = []
-                dist.all_gather(all_gather_batch_rewards, batch_rewards, group=dp_group)
-                batch_rewards = paddle.flatten(paddle.stack(all_gather_batch_rewards))
+                if sd_group.nranks > 1:
+                    all_gather_batch_rewards = []
+                    dist.all_gather(all_gather_batch_rewards, batch_rewards, group=sd_group)
+                    batch_rewards = paddle.flatten(paddle.stack(all_gather_batch_rewards))
+                if dp_group.nranks > 1:
+                    all_gather_batch_rewards = []
+                    dist.all_gather(all_gather_batch_rewards, batch_rewards, group=dp_group)
+                    batch_rewards = paddle.flatten(paddle.stack(all_gather_batch_rewards))
+            except AttributeError:
+                pass
 
             batch_rewards_mean = batch_rewards.mean()
             # batch_rewards_std = batch_rewards.std()
@@ -2821,9 +2820,6 @@ class PPOTrainer(Trainer):
             rl_batch.pop("prompt")
 
         if use_advantage_normalization:
-            hcg = fleet.get_hybrid_communicate_group()
-            sd_group = hcg.get_sharding_parallel_group()
-            dp_group = hcg.get_data_parallel_group()
             all_advantages_list = []
             for rl_batch in rl_batches:
                 sequence_mask = rl_batch["sequence_mask"].cast(paddle.int64)  # length: src + tgt
@@ -2832,17 +2828,23 @@ class PPOTrainer(Trainer):
             all_advantages = paddle.concat(all_advantages_list, axis=0)
             all_advantages = all_advantages.cast(paddle.float32)
 
-            if sd_group.nranks > 1:
-                object_list = []
-                dist.all_gather_object(object_list, all_advantages.tolist(), group=sd_group)
-                flattened_data = [item for sublist in object_list for item in sublist]
-                all_advantages = paddle.to_tensor(flattened_data, dtype="float32")
-            if dp_group.nranks > 1:
-                object_list = []
-                dist.all_gather_object(object_list, all_advantages.tolist(), group=dp_group)
-                flattened_data = [item for sublist in object_list for item in sublist]
-                all_advantages = paddle.to_tensor(flattened_data, dtype="float32")
+            try:
+                hcg = fleet.get_hybrid_communicate_group()
+                sd_group = hcg.get_sharding_parallel_group()
+                dp_group = hcg.get_data_parallel_group()
 
+                if sd_group.nranks > 1:
+                    object_list = []
+                    dist.all_gather_object(object_list, all_advantages.tolist(), group=sd_group)
+                    flattened_data = [item for sublist in object_list for item in sublist]
+                    all_advantages = paddle.to_tensor(flattened_data, dtype="float32")
+                if dp_group.nranks > 1:
+                    object_list = []
+                    dist.all_gather_object(object_list, all_advantages.tolist(), group=dp_group)
+                    flattened_data = [item for sublist in object_list for item in sublist]
+                    all_advantages = paddle.to_tensor(flattened_data, dtype="float32")
+            except AttributeError:
+                pass
             all_advantages_mean = all_advantages.mean()
             all_advantages_std = all_advantages.std()
             for rl_batch in rl_batches:
