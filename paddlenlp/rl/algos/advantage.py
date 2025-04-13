@@ -20,6 +20,61 @@ import paddle
 from ..utils.comm_utils import masked_whiten
 
 
+def compute_gae_advantage_return(
+    token_level_rewards: paddle.Tensor,
+    values: paddle.Tensor,
+    sequence_mask: paddle.Tensor,
+    start: int,
+    gamma: paddle.Tensor,
+    lam: paddle.Tensor,
+    use_tgt_len_return: bool = True,
+) -> Tuple[paddle.Tensor, paddle.Tensor]:
+    """Compute advantages and returns using Generalized Advantage Estimation (GAE)."""
+    # Modified from https://github.com/CarperAI/trlx/blob/main/trlx/models/modeling_ppo.py
+    lastgaelam = 0.0
+    advantages_reversed = []
+    gen_len = token_level_rewards.shape[-1]
+
+    values = values * sequence_mask
+    token_level_rewards = token_level_rewards * sequence_mask
+    if use_tgt_len_return and start > 0:
+        # consistent with Beaver
+        # values length is src+tgt-1, start is src-1, return length is tgt
+        pass
+    elif use_tgt_len_return:
+        # values length is tgt, start is 0, return length is tgt
+        assert start == 0
+    else:
+        # values length is src+tgt-1, start is src-1, return length is src+tgt-1
+        pass
+    for t in reversed(range(start, gen_len)):  # pylint: disable=invalid-name
+        next_values = values[:, t + 1] if t < gen_len - 1 else 0.0
+        delta = token_level_rewards[:, t] + gamma * next_values - values[:, t]
+        lastgaelam = delta + gamma * lam * lastgaelam
+        advantages_reversed.append(lastgaelam)
+    advantages = paddle.stack(advantages_reversed[::-1], axis=1)
+
+    returns = advantages + values[:, start:].contiguous()
+
+    if not use_tgt_len_return:
+        advantages = paddle.concat(
+            [
+                paddle.zeros([advantages.shape[0], start], dtype=advantages.dtype),
+                advantages,
+            ],
+            axis=-1,
+        )
+        returns = paddle.concat(
+            [
+                paddle.zeros([returns.shape[0], start], dtype=returns.dtype),
+                returns,
+            ],
+            axis=-1,
+        )
+
+    return advantages.detach(), returns
+
+
 @paddle.no_grad()
 def compute_grpo_advantages(
     rewards: paddle.Tensor,
@@ -84,3 +139,44 @@ def compute_reinforce_plus_plus_advantages_and_returns(
     advantages = masked_whiten(returns, eos_mask)
     advantages = advantages * eos_mask
     return advantages, returns
+
+
+def add_kl_divergence_regularization(
+    prompt: paddle.Tensor,  # size = (B, S) # pylint: disable=unused-argument
+    log_probs: paddle.Tensor,  # size = (B, L)
+    ref_log_probs: paddle.Tensor,  # size = (B, L)
+    reward_score: paddle.Tensor,  # size = (B,)
+    sequence_mask: paddle.Tensor,  # size = (B, L)
+    kl_coeff: float,
+    clip_range_score: float,
+) -> paddle.Tensor:
+    """
+        计算KL散度迭代增益，并将其添加到回报中。
+    参数：
+        prompt (paddle.Tensor, shape=(B, S)): 输入序列的prompt，未使用。
+        log_probs (paddle.Tensor, shape=(B, L)): 当前预测的log概率分布。
+        ref_log_probs (paddle.Tensor, shape=(B, L)): 基线预测的log概率分布。
+        reward_score (paddle.Tensor, shape=(B,)): 基于prompt和输出序列的基本奖励得分。
+        sequence_mask (paddle.Tensor, shape=(B, L)): 序列的mask，用于确定序列的长度。
+    返回值（paddle.Tensor, shape=(B, L)}：
+        包含KL散度迭代增益的向量。
+    """
+
+    kl_divergence_estimate = -kl_coeff * (log_probs - ref_log_probs)  # size = (B, L)
+    rewards = kl_divergence_estimate  # size = (B, L)
+    reward_clip = paddle.clip(  # size = (B,)
+        reward_score,
+        min=-clip_range_score,
+        max=clip_range_score,
+    )
+    # TODO(guosheng): use scatter_add/put_along_axis
+    index = paddle.cumsum(sequence_mask.cast(paddle.int64), axis=-1).argmax(-1, keepdim=True)
+
+    rewards = paddle.put_along_axis(
+        rewards,
+        index,
+        reward_clip.unsqueeze(axis=-1),
+        axis=-1,
+        reduce="add",
+    )
+    return rewards, kl_divergence_estimate

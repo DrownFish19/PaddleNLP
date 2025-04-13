@@ -56,6 +56,8 @@ from ...utils.env import PADDLE_WEIGHTS_NAME
 from ..algos.advantage import (
     compute_grpo_advantages,
     compute_reinforce_plus_plus_advantages_and_returns,
+    compute_gae_advantage_return,
+    add_kl_divergence_regularization,
 )
 from ..models.ppo_model_utils import make_position_ids_from_input_ids
 from ..utils.comm_utils import (
@@ -1567,96 +1569,6 @@ class PPOTrainer(Trainer):
         with guard_set_args(self.control, {"should_log": False}):
             super()._maybe_log_save_evaluate(tr_loss, model, epoch, ignore_keys_for_eval)
 
-    def add_kl_divergence_regularization(
-        self,
-        prompt: paddle.Tensor,  # size = (B, S) # pylint: disable=unused-argument
-        log_probs: paddle.Tensor,  # size = (B, L)
-        ref_log_probs: paddle.Tensor,  # size = (B, L)
-        reward_score: paddle.Tensor,  # size = (B,)
-        sequence_mask: paddle.Tensor,  # size = (B, L)
-    ) -> paddle.Tensor:
-        """
-            计算KL散度迭代增益，并将其添加到回报中。
-        参数：
-            prompt (paddle.Tensor, shape=(B, S)): 输入序列的prompt，未使用。
-            log_probs (paddle.Tensor, shape=(B, L)): 当前预测的log概率分布。
-            ref_log_probs (paddle.Tensor, shape=(B, L)): 基线预测的log概率分布。
-            reward_score (paddle.Tensor, shape=(B,)): 基于prompt和输出序列的基本奖励得分。
-            sequence_mask (paddle.Tensor, shape=(B, L)): 序列的mask，用于确定序列的长度。
-        返回值（paddle.Tensor, shape=(B, L)}：
-            包含KL散度迭代增益的向量。
-        """
-
-        kl_divergence_estimate = -self.kl_coeff * (log_probs - ref_log_probs)  # size = (B, L)
-        rewards = kl_divergence_estimate  # size = (B, L)
-        reward_clip = paddle.clip(  # size = (B,)
-            reward_score,
-            min=-self.clip_range_score,
-            max=self.clip_range_score,
-        )
-        # TODO(guosheng): use scatter_add/put_along_axis
-        index = paddle.cumsum(sequence_mask.cast(paddle.int64), axis=-1).argmax(-1, keepdim=True)
-
-        rewards = paddle.put_along_axis(
-            rewards,
-            index,
-            reward_clip.unsqueeze(axis=-1),
-            axis=-1,
-            reduce="add",
-        )
-        return rewards, kl_divergence_estimate
-
-    def get_advantages_and_returns(
-        self,
-        values: paddle.Tensor,
-        rewards: paddle.Tensor,
-        sequence_mask: paddle.Tensor,
-        start: int,
-        use_tgt_len_return: bool = True,
-    ) -> Tuple[paddle.Tensor, paddle.Tensor]:
-        """Compute advantages and returns using Generalized Advantage Estimation (GAE)."""
-        # Modified from https://github.com/CarperAI/trlx/blob/main/trlx/models/modeling_ppo.py
-        last_gae_lambda = 0.0
-        advantages_reversed = []
-        values = values * sequence_mask
-        rewards = rewards * sequence_mask
-        length = rewards.shape[-1]
-        if use_tgt_len_return and start > 0:
-            # consistent with Beaver
-            # values length is src+tgt-1, start is src-1, return length is tgt
-            pass
-        elif use_tgt_len_return:
-            # values length is tgt, start is 0, return length is tgt
-            assert start == 0
-        else:
-            # values length is src+tgt-1, start is src-1, return length is src+tgt-1
-            pass
-        for t in reversed(range(start, length)):  # pylint: disable=invalid-name
-            next_values = values[:, t + 1] if t < length - 1 else 0.0
-            delta = rewards[:, t] + self.gamma * next_values - values[:, t]
-            last_gae_lambda = delta + self.gamma * self.gae_lambda * last_gae_lambda
-            advantages_reversed.append(last_gae_lambda)
-        advantages = paddle.stack(advantages_reversed[::-1], axis=1)
-        returns = advantages + values[:, start:].contiguous()
-
-        if not use_tgt_len_return:
-            advantages = paddle.concat(
-                [
-                    paddle.zeros([advantages.shape[0], start], dtype=advantages.dtype),
-                    advantages,
-                ],
-                axis=-1,
-            )
-            returns = paddle.concat(
-                [
-                    paddle.zeros([returns.shape[0], start], dtype=returns.dtype),
-                    returns,
-                ],
-                axis=-1,
-            )
-
-        return advantages.detach(), returns
-
     @paddle.no_grad()
     def compute_reward_normalization(self, rl_batches):
         batch_rewards_list = [rl_batch["rewards"] for rl_batch in rl_batches]
@@ -1722,29 +1634,35 @@ class PPOTrainer(Trainer):
             elif self.args.rl_algorithm == "ppo":
                 start = rl_batch["prompt"].shape[-1] - 1
                 eos_mask = (rl_batch["input_ids"] != self.tokenizer.pad_token_id)[:, 1:].to(old_log_probs.dtype)
-                rewards_with_kl, kl_rewards = self.add_kl_divergence_regularization(
+                rewards_with_kl, kl_rewards = add_kl_divergence_regularization(
                     None,  # prompt,
                     old_log_probs,
                     ref_log_probs,
                     rewards,
                     eos_mask[:, start:],
+                    self.kl_coeff,
+                    self.clip_range_score,
                 )  # length: tgt if use_tgt_len_value src + tgt -1
-                reward_advantages, reward_returns = self.get_advantages_and_returns(
-                    old_reward_values,
+                reward_advantages, reward_returns = compute_gae_advantage_return(
                     rewards_with_kl,
+                    old_reward_values,
                     eos_mask[:, start:],
                     start=0 if use_tgt_len_value else start,
+                    gamma=self.gamma,
+                    lam=self.gae_lambda,
                     use_tgt_len_return=use_tgt_len_value,
                 )  # length: tgt if use_tgt_len_value src + tgt -1
             elif self.args.rl_algorithm == "reinforce_plus_plus":
                 start = 0
                 eos_mask = rl_batch["eos_mask"]
-                rewards_with_kl, kl_rewards = self.add_kl_divergence_regularization(
+                rewards_with_kl, kl_rewards = add_kl_divergence_regularization(
                     None,  # prompt,
                     old_log_probs,
                     ref_log_probs,
                     rewards,
                     eos_mask[:, start:],
+                    self.kl_coeff,
+                    self.clip_range_score,
                 )  # length: tgt if use_tgt_len_value src + tgt -1
                 reward_advantages, reward_returns = compute_reinforce_plus_plus_advantages_and_returns(
                     rewards_with_kl,
