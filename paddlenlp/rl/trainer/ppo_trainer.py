@@ -82,6 +82,7 @@ from .trainer_utils import (
     is_same_tokenizer,
     process_row,
 )
+from ...datasets.rlhf_datasets.protocol import DataProto
 
 
 class PPOMetric:
@@ -1265,15 +1266,17 @@ class PPOTrainer(Trainer):
 
             step = -1
             for prompt_only_batch in self.prompt_only_dataloader:
+
+                batch: DataProto = DataProto.from_single_dict(prompt_only_batch)
                 self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
                 # step 1-1: rollout data with actor model (eval) and reward model
                 self.set_eval()
 
                 data_trans_group = getattr(self.actor_trainer, "_data_trans_group", None)
-                prompt_only_batch = data_group_split(prompt_only_batch, group=data_trans_group)
+                batch = data_group_split(batch, group=data_trans_group)
 
                 cleanup_batches, indices, label_ids_batches = [], [], []
-                total_batch_size = prompt_only_batch["input_ids"].shape[0]
+                total_batch_size = batch["input_ids"].shape[0]
                 per_device_rollout_batch_size = self.args.per_device_rollout_batch_size
 
                 timer_scope_actor_model = TimerScope(
@@ -1289,7 +1292,7 @@ class PPOTrainer(Trainer):
                         for i in range(0, total_batch_size, per_device_rollout_batch_size):
                             micro_batch = map_structure(
                                 lambda tensor: tensor[i : i + per_device_rollout_batch_size],
-                                prompt_only_batch,
+                                batch,
                             )
 
                             # generate for multi batches and then disable FuseMT model
