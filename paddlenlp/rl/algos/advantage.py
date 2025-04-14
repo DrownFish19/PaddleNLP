@@ -168,15 +168,17 @@ def add_kl_divergence_regularization(
     clip_range_score: float,
 ) -> paddle.Tensor:
     """
-        计算KL散度迭代增益，并将其添加到回报中。
-    参数：
-        prompt (paddle.Tensor, shape=(B, S)): 输入序列的prompt，未使用。
-        log_probs (paddle.Tensor, shape=(B, L)): 当前预测的log概率分布。
-        ref_log_probs (paddle.Tensor, shape=(B, L)): 基线预测的log概率分布。
-        reward_score (paddle.Tensor, shape=(B,)): 基于prompt和输出序列的基本奖励得分。
-        sequence_mask (paddle.Tensor, shape=(B, L)): 序列的mask，用于确定序列的长度。
-    返回值（paddle.Tensor, shape=(B, L)}：
-        包含KL散度迭代增益的向量。
+    Calculate the KL divergence regularization gain and add it to the reward.
+
+    Args:
+        prompt (paddle.Tensor, shape=(B, S)): The prompt of the input sequence, not used.
+        log_probs (paddle.Tensor, shape=(B, L)): The log probability distribution of the current predictions.
+        ref_log_probs (paddle.Tensor, shape=(B, L)): The log probability distribution of the baseline predictions.
+        reward_score (paddle.Tensor, shape=(B,)): The base reward score based on the prompt and output sequence.
+        sequence_mask (paddle.Tensor, shape=(B, L)): The mask of the sequence, used to determine the length of the sequence.
+
+    Returns:
+        paddle.Tensor, shape=(B, L): A vector containing the KL divergence regularization gain.
     """
 
     kl_divergence_estimate = -kl_coeff * (log_probs - ref_log_probs)  # size = (B, L)

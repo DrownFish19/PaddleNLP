@@ -1543,47 +1543,6 @@ class PPOTrainer(Trainer):
         with guard_set_args(self.control, {"should_log": False}):
             super()._maybe_log_save_evaluate(tr_loss, model, epoch, ignore_keys_for_eval)
 
-    def add_kl_divergence_regularization(
-        self,
-        prompt: paddle.Tensor,  # size = (B, S) # pylint: disable=unused-argument
-        log_probs: paddle.Tensor,  # size = (B, L)
-        ref_log_probs: paddle.Tensor,  # size = (B, L)
-        reward_score: paddle.Tensor,  # size = (B,)
-        sequence_mask: paddle.Tensor,  # size = (B, L)
-    ) -> paddle.Tensor:
-        """
-        Calculate the KL divergence regularization gain and add it to the reward.
-
-        Args:
-            prompt (paddle.Tensor, shape=(B, S)): The prompt of the input sequence, not used.
-            log_probs (paddle.Tensor, shape=(B, L)): The log probability distribution of the current predictions.
-            ref_log_probs (paddle.Tensor, shape=(B, L)): The log probability distribution of the baseline predictions.
-            reward_score (paddle.Tensor, shape=(B,)): The base reward score based on the prompt and output sequence.
-            sequence_mask (paddle.Tensor, shape=(B, L)): The mask of the sequence, used to determine the length of the sequence.
-
-        Returns:
-            paddle.Tensor, shape=(B, L): A vector containing the KL divergence regularization gain.
-        """
-
-        kl_divergence_estimate = -self.kl_coeff * (log_probs - ref_log_probs)  # size = (B, L)
-        rewards = kl_divergence_estimate  # size = (B, L)
-        reward_clip = paddle.clip(  # size = (B,)
-            reward_score,
-            min=-self.clip_range_score,
-            max=self.clip_range_score,
-        )
-        # TODO(guosheng): use scatter_add/put_along_axis
-        index = paddle.cumsum(sequence_mask.cast(paddle.int64), axis=-1).argmax(-1, keepdim=True)
-
-        rewards = paddle.put_along_axis(
-            rewards,
-            index,
-            reward_clip.unsqueeze(axis=-1),
-            axis=-1,
-            reduce="add",
-        )
-        return rewards, kl_divergence_estimate
-
     def get_advantages_and_returns(
         self,
         values: paddle.Tensor,
