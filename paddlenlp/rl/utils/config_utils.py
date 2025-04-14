@@ -29,6 +29,44 @@ class TrainingArguments(TrainingArguments):
         default=None,
         metadata={"help": "The log prob batch size."},
     )
+    # per_device_prompt_batch_size: int = field(
+    #     default=16,
+    #     metadata={"help": "Batch size (per device) for the training dataloader."},
+    # )
+    # per_device_rollout_batch_size: int = field(
+    #     default=-1,
+    #     metadata={"help": "Batch size per GPU core/CPU for rollout."},
+    # )
+    global_prompt_batch_size: int = field(
+        default=-1,
+        metadata={
+            "help": "Global batch size for prompt, which equals datasets_parallel_degre * per_device_rollout_batch_size"
+        },
+    )
+    global_rollout_batch_size: int = field(
+        default=-1,
+        metadata={
+            "help": "Global batch size for rollout, which equals datasets_parallel_degre * per_device_rollout_batch_size"
+        },
+    )
+    global_logprob_batch_size: int = field(
+        default=-1,
+        metadata={
+            "help": "Global batch size for logprob, which equals datasets_parallel_degre * per_device_rollout_batch_size"
+        },
+    )
+    global_reward_batch_size: int = field(
+        default=-1,
+        metadata={
+            "help": "Global batch size for reward, which equals datasets_parallel_degre * per_device_rollout_batch_size"
+        },
+    )
+    global_value_batch_size: int = field(
+        default=-1,
+        metadata={
+            "help": "Global batch size for reward, which equals datasets_parallel_degre * per_device_rollout_batch_size"
+        },
+    )
     use_fused_rms_norm: bool = field(
         default=False,
         metadata={"help": "qwen, use_fused_rms_norm"},
@@ -124,10 +162,6 @@ class TrainingArguments(TrainingArguments):
     repetition_penalty: float = field(
         default=1.0,
         metadata={"help": "The parameter for repetition penalty. 1.0 means no penalty."},
-    )
-    per_device_prompt_batch_size: int = field(
-        default=16,
-        metadata={"help": "Batch size (per device) for the training dataloader."},
     )
     eval_mode: str = field(
         default=None,
@@ -235,10 +269,6 @@ class TrainingArguments(TrainingArguments):
         default=True,
         metadata={"help": "use tensor_parallel_output."},
     )
-    per_device_rollout_batch_size: int = field(
-        default=-1,
-        metadata={"help": "Batch size per GPU core/CPU for rollout."},
-    )
     # save_generation_output: bool = field(
     #     default=False,
     #     metadata={"help": "Whether to save generated text to file when eval"},
@@ -305,8 +335,21 @@ class TrainingArguments(TrainingArguments):
 
         paddle.set_device(self.device)
 
-        if self.per_device_rollout_batch_size < 0:
-            self.per_device_rollout_batch_size = self.per_device_train_batch_size
+        self.global_rollout_batch_size = (
+            self.global_rollout_batch_size if self.global_rollout_batch_size >= 1 else self.global_train_batch_size
+        )
+        self.global_logprob_batch_size = (
+            self.global_logprob_batch_size if self.global_logprob_batch_size >= 1 else self.global_train_batch_size
+        )
+        self.global_value_batch_size = (
+            self.global_value_batch_size if self.global_value_batch_size >= 1 else self.global_train_batch_size
+        )
+        self.global_reward_batch_size = (
+            self.global_reward_batch_size if self.global_reward_batch_size >= 1 else self.global_train_batch_size
+        )
+
+        # if self.per_device_rollout_batch_size < 0:
+        #     self.per_device_rollout_batch_size = self.per_device_train_batch_size
         assert self.rl_algorithm in [
             "ppo",
             "grpo",

@@ -16,9 +16,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import paddle
+import paddle.distributed as dist
 from paddle import nn
 from paddle.distributed.fleet.meta_parallel import ParallelCrossEntropy
 from paddle.io import Dataset
+from paddle.utils import map_structure
 
 from ...data import DataCollator
 from ...generation import GenerationConfig
@@ -34,8 +36,9 @@ from ..models.ppo_model_utils import (
     create_startend_row_indices,
     gather_log_probabilities,
 )
+from ..utils.infer_utils import infer_guard
 from .rl_trainer import RLTrainer
-from .trainer_utils import guard_set_args
+from .trainer_utils import guard_set_args, process_row
 
 
 class ActorReferenceTrainer(RLTrainer):
@@ -96,7 +99,32 @@ class ActorReferenceTrainer(RLTrainer):
         return "actor_loss"
 
     @paddle.no_grad()
-    def generate_sequences(self, prompt_only_batch: Dict, do_eval=False) -> List[Dict[str, Any]]:
+    def generate_sequences(self, batch: Dict, do_eval=False) -> List[Dict[str, Any]]:
+        cleanup_batches, indices, label_ids_batches = [], [], []
+
+        total_batch_size = batch["input_ids"].shape[0]
+        per_device_rollout_batch_size = self.args.per_device_rollout_batch_size
+        with infer_guard(self.actor_trainer):
+            for i in range(0, total_batch_size, per_device_rollout_batch_size):
+                micro_batch = map_structure(
+                    lambda tensor: tensor[i : i + per_device_rollout_batch_size],
+                    batch,
+                )
+                # generate for multi batches and then disable FuseMT model
+                generated_batches = self._generate_sequences(micro_batch)
+
+                # NOTE(drownfish19): do process for each micro_batch, prepare for split mode
+                micro_ret = self.remove_pad_tokens_after_generate(generated_batches)
+                micro_cleanup_batches, micro_indices, micro_label_ids_batches = micro_ret
+                cleanup_batches.extend(micro_cleanup_batches)
+                indices.extend(micro_indices)
+                label_ids_batches.extend(micro_label_ids_batches)
+            indices = np.concatenate(indices)
+        self.timers and dist.get_world_size() > 1 and dist.barrier()
+        return cleanup_batches, indices, label_ids_batches
+
+    @paddle.no_grad()
+    def _generate_sequences(self, prompt_only_batch: Dict, do_eval=False) -> List[Dict[str, Any]]:
         """Rollout a batch of experiences."""
         input_ids = prompt_only_batch["input_ids"]
         # attention_mask = prompt_only_batch["attention_mask"]
@@ -163,6 +191,27 @@ class ActorReferenceTrainer(RLTrainer):
             }
             for idx, seq in enumerate(sequences)
         ]
+
+    def remove_pad_tokens_after_generate(self, generated_batches):
+        cleanup_batches, indices, label_ids_batches = [], [], []
+
+        for batch in generated_batches:
+            cleanup_batches.extend(
+                [
+                    process_row(row, remove_value=self.tokenizer.pad_token_id, remove_side="right")
+                    for row in batch["input_ids"]
+                ]
+            )
+            if self.args.use_rm_server:
+                label_ids_batches.extend(
+                    [
+                        process_row(row, remove_value=self.tokenizer.pad_token_id, remove_side="right")
+                        for row in batch["label_ids"]
+                    ]
+                )
+            indices.append(batch["index"])
+
+        return cleanup_batches, indices, label_ids_batches
 
     @paddle.no_grad()
     def compute_logprob(self, input_ids: paddle.Tensor, position_ids: paddle.Tensor = None, **kwargs) -> paddle.Tensor:

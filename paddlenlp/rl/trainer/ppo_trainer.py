@@ -27,11 +27,11 @@ from paddle import nn
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import PipelineLayer
 from paddle.io import DataLoader, Dataset, DistributedBatchSampler
-from paddle.utils import map_structure
 from rich.console import Console
 from rich.table import Table
 
 from ...data import DataCollator
+from ...datasets.rlhf_datasets.protocol import DataProto
 from ...trainer.trainer import (
     EvalLoopOutput,
     EvalPrediction,
@@ -54,10 +54,10 @@ from ...transformers import (
 from ...transformers.model_utils import _add_variant
 from ...utils.env import PADDLE_WEIGHTS_NAME
 from ..algos.advantage import (
+    add_kl_divergence_regularization,
+    compute_gae_advantage_return,
     compute_grpo_advantages,
     compute_reinforce_plus_plus_advantages_and_returns,
-    compute_gae_advantage_return,
-    add_kl_divergence_regularization,
 )
 from ..models.ppo_model_utils import make_position_ids_from_input_ids
 from ..utils.comm_utils import (
@@ -80,9 +80,7 @@ from .trainer_utils import (
     batch_retokenize,
     guard_set_args,
     is_same_tokenizer,
-    process_row,
 )
-from ...datasets.rlhf_datasets.protocol import DataProto
 
 
 class PPOMetric:
@@ -1064,27 +1062,6 @@ class PPOTrainer(Trainer):
             rl_loss.update(value_loss)
         return rl_loss
 
-    def remove_pad_tokens_after_generate(self, generated_batches):
-        cleanup_batches, indices, label_ids_batches = [], [], []
-
-        for batch in generated_batches:
-            cleanup_batches.extend(
-                [
-                    process_row(row, remove_value=self.tokenizer.pad_token_id, remove_side="right")
-                    for row in batch["input_ids"]
-                ]
-            )
-            if self.args.use_rm_server:
-                label_ids_batches.extend(
-                    [
-                        process_row(row, remove_value=self.tokenizer.pad_token_id, remove_side="right")
-                        for row in batch["label_ids"]
-                    ]
-                )
-            indices.append(batch["index"])
-
-        return cleanup_batches, indices, label_ids_batches
-
     def truncate_batch_data(self, batch, truncate_max_len):
         if len(batch) > truncate_max_len:
             batch = self.tokenizer.truncate_sequences(
@@ -1274,11 +1251,6 @@ class PPOTrainer(Trainer):
 
                 data_trans_group = getattr(self.actor_trainer, "_data_trans_group", None)
                 batch = data_group_split(batch, group=data_trans_group)
-
-                cleanup_batches, indices, label_ids_batches = [], [], []
-                total_batch_size = batch["input_ids"].shape[0]
-                per_device_rollout_batch_size = self.args.per_device_rollout_batch_size
-
                 timer_scope_actor_model = TimerScope(
                     self.timers,
                     RolloutStages.ACTOR_MODEL_ENABLE_DISABLE,
@@ -1286,25 +1258,9 @@ class PPOTrainer(Trainer):
                 )
                 timer_scope_actor_model.start()
                 with reload_and_offload_scope(self, self.actor_model, self.reference_model):
-                    timer_scope_rollout = TimerScope(self.timers, RolloutStages.GENERATE)
-                    timer_scope_rollout.start()
-                    with infer_guard(self.actor_trainer):
-                        for i in range(0, total_batch_size, per_device_rollout_batch_size):
-                            micro_batch = map_structure(
-                                lambda tensor: tensor[i : i + per_device_rollout_batch_size],
-                                batch,
-                            )
-
-                            # generate for multi batches and then disable FuseMT model
-                            generated_batches = self.actor_trainer.generate_sequences(micro_batch)
-                            # NOTE(drownfish19): do process for each micro_batch, prepare for split mode
-                            micro_ret = self.remove_pad_tokens_after_generate(generated_batches)
-                            micro_cleanup_batches, micro_indices, micro_label_ids_batches = micro_ret
-                            cleanup_batches.extend(micro_cleanup_batches)
-                            indices.extend(micro_indices)
-                            label_ids_batches.extend(micro_label_ids_batches)
-                        indices = np.concatenate(indices)
-                    timer_scope_rollout.stop()
+                    with TimerScope(self.timers, RolloutStages.GENERATE):
+                        generated_batches = self.actor_trainer.generate_sequences(batch)
+                        cleanup_batches, indices, label_ids_batches = generated_batches
 
                     # step 2-1: compute logprob for rollout data
                     with TimerScope(self.timers, RolloutStages.ROLLOUT_LOGPROB):
@@ -1403,8 +1359,7 @@ class PPOTrainer(Trainer):
                     with reload_and_offload_scope(self, self.actor_model, self.actor_trainer.optimizer):
                         with TimerScope(self.timers, ActorStages.RL_STEP):
                             # timer_info = {} # prepare for each micro_step
-
-                            for micro_step, rl_batch in enumerate(train_batch):
+                            for micro_step, rl_batch in enumerate(train_batch * self.args.update_iters):
                                 step = 0 if step == -1 else step
                                 with TimerScopeManualLabel(
                                     self.timers,
