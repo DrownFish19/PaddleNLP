@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Optional
 
 import paddle
 
@@ -97,10 +96,6 @@ class TrainingArguments(TrainingArguments):
             "help": "The clipping range for the value function. The value is clipped into [value_estimate - "
             "clip_range_value, value_estimate + clip_range_value] during training."
         },
-    )
-    ptx_coeff: float = field(
-        default=0.0,
-        metadata={"help": "The coefficient for the ptx loss."},
     )
     update_iters: int = field(
         default=1,
@@ -209,28 +204,6 @@ class TrainingArguments(TrainingArguments):
         metadata={
             "help": "The steps use to control the learing rate. If the step > decay_steps, "
             "will use the min_learning_rate."
-        },
-    )
-    unified_checkpoint: bool = field(
-        default=True,
-        metadata={
-            "help": "Enable fused linear grad add strategy, which will reduce elementwise "
-            "add for grad accumulation in the backward of nn.Linear ."
-        },
-    )
-    unified_checkpoint_config: Optional[str] = field(
-        default="",
-        metadata={
-            "help": (
-                "Configs to unify hybrid parallel checkpoint.\n"
-                "Following options are supports:\n"
-                "- skip_save_model_weight: do not save model weights when the masters weight exist\n"
-                "- master_weight_compatible: 1. if the master weights exist, only load when needed\n"
-                "                            2. if master weights does not exist, convert model weights"
-                " to master weights when needed\n"
-                "- async_save: enable asynchronous saving checkpoints to disk\n"
-                "- enable_all_options: enable all optimization configurations\n"
-            )
         },
     )
     autotuner_benchmark: bool = field(
