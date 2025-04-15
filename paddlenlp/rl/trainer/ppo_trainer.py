@@ -1012,7 +1012,7 @@ class PPOTrainer(Trainer):
                 len_dataloader
                 * self.args.update_iters
                 * self.args.per_device_prompt_batch_size
-                * self.args.num_return_sequences
+                * self.args.rollout_n
                 // self.args.per_device_train_batch_size
             )
             num_update_steps_per_epoch = num_train_sub_steps // args.gradient_accumulation_steps

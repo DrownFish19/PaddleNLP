@@ -29,43 +29,33 @@ class TrainingArguments(TrainingArguments):
         default=None,
         metadata={"help": "The log prob batch size."},
     )
-    # per_device_prompt_batch_size: int = field(
-    #     default=16,
-    #     metadata={"help": "Batch size (per device) for the training dataloader."},
-    # )
-    # per_device_rollout_batch_size: int = field(
-    #     default=-1,
-    #     metadata={"help": "Batch size per GPU core/CPU for rollout."},
-    # )
-    global_prompt_batch_size: int = field(
-        default=-1,
-        metadata={
-            "help": "Global batch size for prompt, which equals datasets_parallel_degre * per_device_rollout_batch_size"
-        },
+    global_train_batch_size: int = field(
+        default=8,
+        metadata={"help": "Global batch size for input prompt."},
     )
-    global_rollout_batch_size: int = field(
+    mini_train_batch_size: int = field(
         default=-1,
-        metadata={
-            "help": "Global batch size for rollout, which equals datasets_parallel_degre * per_device_rollout_batch_size"
-        },
+        metadata={"help": "Mini-batch size (global) for the training dataloader."},
     )
-    global_logprob_batch_size: int = field(
-        default=-1,
-        metadata={
-            "help": "Global batch size for logprob, which equals datasets_parallel_degre * per_device_rollout_batch_size"
-        },
+    per_device_train_batch_size: int = field(
+        default=1,
+        metadata={"help": "Batch size (per device) for the training dataloader."},
     )
-    global_reward_batch_size: int = field(
+    per_device_rollout_batch_size: int = field(
         default=-1,
-        metadata={
-            "help": "Global batch size for reward, which equals datasets_parallel_degre * per_device_rollout_batch_size"
-        },
+        metadata={"help": "Batch size (per device) for the training dataloader."},
     )
-    global_value_batch_size: int = field(
+    per_device_logprob_batch_size: int = field(
         default=-1,
-        metadata={
-            "help": "Global batch size for reward, which equals datasets_parallel_degre * per_device_rollout_batch_size"
-        },
+        metadata={"help": "Batch size (per device) for the training dataloader."},
+    )
+    per_device_reward_batch_size: int = field(
+        default=-1,
+        metadata={"help": "Batch size (per device) for the training dataloader."},
+    )
+    per_device_value_batch_size: int = field(
+        default=-1,
+        metadata={"help": "Batch size (per device) for the training dataloader."},
     )
     use_fused_rms_norm: bool = field(
         default=False,
@@ -155,7 +145,7 @@ class TrainingArguments(TrainingArguments):
             "with probabilities that add up to`top_p` or higher are kept for generation."
         },
     )
-    num_return_sequences: int = field(
+    rollout_n: int = field(
         default=1,
         metadata={"help": "The number of independently computed returned sequences for each element in the batch."},
     )
@@ -312,6 +302,26 @@ class TrainingArguments(TrainingArguments):
         Raises:
             None.
         """
+        # obtain the parallrl degree from the training arguments
+        # for auto config the accumulation steps
+        self._post_init_parallel_degree()
+
+        if self.mini_train_batch_size < 0:
+            self.mini_train_batch_size = self.global_train_batch_size
+
+        if self.per_device_rollout_batch_size < 0:
+            self.per_device_train_batch_size = self.per_device_train_batch_size
+        if self.per_device_logprob_batch_size < 0:
+            self.per_device_logprob_batch_size = self.per_device_train_batch_size
+        if self.per_device_reward_batch_size < 0:
+            self.per_device_reward_batch_size = self.per_device_train_batch_size
+        if self.per_device_value_batch_size < 0:
+            self.per_device_value_batch_size = self.per_device_train_batch_size
+
+        self.gradient_accumulation_steps = (
+            self.mini_train_batch_size * self.rollout_n // self.per_device_train_batch_size // self.dataset_world_size
+        )
+
         super().__post_init__()
         if self.autotuner_benchmark:
             self.num_train_epochs = 1
@@ -335,21 +345,6 @@ class TrainingArguments(TrainingArguments):
 
         paddle.set_device(self.device)
 
-        self.global_rollout_batch_size = (
-            self.global_rollout_batch_size if self.global_rollout_batch_size >= 1 else self.global_train_batch_size
-        )
-        self.global_logprob_batch_size = (
-            self.global_logprob_batch_size if self.global_logprob_batch_size >= 1 else self.global_train_batch_size
-        )
-        self.global_value_batch_size = (
-            self.global_value_batch_size if self.global_value_batch_size >= 1 else self.global_train_batch_size
-        )
-        self.global_reward_batch_size = (
-            self.global_reward_batch_size if self.global_reward_batch_size >= 1 else self.global_train_batch_size
-        )
-
-        # if self.per_device_rollout_batch_size < 0:
-        #     self.per_device_rollout_batch_size = self.per_device_train_batch_size
         assert self.rl_algorithm in [
             "ppo",
             "grpo",
@@ -359,14 +354,14 @@ class TrainingArguments(TrainingArguments):
             self.normalize_reward = False
             self.normalize_advantage = False
 
-        if self.per_device_eval_batch_size > self.per_device_rollout_batch_size * self.num_return_sequences:
+        if self.per_device_eval_batch_size > self.per_device_rollout_batch_size * self.rollout_n:
             logger.warning(
                 f"per_device_eval_batch_size: {self.per_device_eval_batch_size} is larger than "
-                f"per_device_rollout_batch_size: {self.per_device_rollout_batch_size} * num_return_sequences: "
-                f"{self.num_return_sequences}, which may cause infer error. "
-                f"We will set it to per_device_rollout_batch_size * num_return_sequences!"
+                f"per_device_rollout_batch_size: {self.per_device_rollout_batch_size} * rollout_n: "
+                f"{self.rollout_n}, which may cause infer error. "
+                f"We will set it to per_device_rollout_batch_size * rollout_n!"
             )
-            self.per_device_eval_batch_size = self.per_device_rollout_batch_size * self.num_return_sequences
+            self.per_device_eval_batch_size = self.per_device_rollout_batch_size * self.rollout_n
 
         self.offload_level = self.offload_level.split()
 
