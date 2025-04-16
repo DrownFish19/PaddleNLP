@@ -24,15 +24,15 @@ from ...trainer.trainer_utils import IntervalStrategy
 
 @dataclass
 class TrainingArguments(TrainingArguments):
-    rollout_logprob_batch_size: str = field(
-        default=None,
-        metadata={"help": "The log prob batch size."},
-    )
-    global_train_batch_size: int = field(
+    # rollout_logprob_batch_size: str = field(
+    #     default=None,
+    #     metadata={"help": "The log prob batch size."},
+    # )
+    global_batch_size: int = field(
         default=8,
         metadata={"help": "Global batch size for input prompt."},
     )
-    mini_train_batch_size: int = field(
+    mini_batch_size: int = field(
         default=-1,
         metadata={"help": "Mini-batch size (global) for the training dataloader."},
     )
@@ -279,8 +279,8 @@ class TrainingArguments(TrainingArguments):
         # for auto config the accumulation steps
         self._post_init_parallel_degree()
 
-        if self.mini_train_batch_size < 0:
-            self.mini_train_batch_size = self.global_train_batch_size
+        if self.mini_batch_size < 0:
+            self.mini_batch_size = self.global_batch_size
 
         if self.per_device_rollout_batch_size < 0:
             self.per_device_train_batch_size = self.per_device_train_batch_size
@@ -292,7 +292,11 @@ class TrainingArguments(TrainingArguments):
             self.per_device_value_batch_size = self.per_device_train_batch_size
 
         self.gradient_accumulation_steps = (
-            self.mini_train_batch_size * self.rollout_n // self.per_device_train_batch_size // self.dataset_world_size
+            self.mini_batch_size
+            * self.rollout_n
+            * self.update_iters
+            // self.per_device_train_batch_size
+            // self.dataset_world_size
         )
 
         super().__post_init__()

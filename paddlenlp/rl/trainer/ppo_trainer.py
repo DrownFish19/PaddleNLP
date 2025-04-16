@@ -59,7 +59,6 @@ from ..algos.advantage import (
     compute_grpo_advantages,
     compute_reinforce_plus_plus_advantages_and_returns,
 )
-from ..models.ppo_model_utils import make_position_ids_from_input_ids
 from ..utils.comm_utils import (
     ActorStages,
     RolloutStages,
@@ -1009,11 +1008,7 @@ class PPOTrainer(Trainer):
         if not self._is_iterable_dataset(self.train_dataset):
             len_dataloader = len(train_dataloader)
             num_train_sub_steps = (
-                len_dataloader
-                * self.args.update_iters
-                * self.args.per_device_prompt_batch_size
-                * self.args.rollout_n
-                // self.args.per_device_train_batch_size
+                len_dataloader * self.args.update_iters * self.args.global_batch_size * self.args.rollout_n
             )
             num_update_steps_per_epoch = num_train_sub_steps // args.gradient_accumulation_steps
             num_examples = len(self.train_dataset)
@@ -1077,28 +1072,6 @@ class PPOTrainer(Trainer):
             rl_loss.update(value_loss)
         return rl_loss
 
-    def truncate_batch_data(self, batch, truncate_max_len):
-        if len(batch) > truncate_max_len:
-            batch = self.tokenizer.truncate_sequences(
-                batch,
-                num_tokens_to_remove=len(batch) - truncate_max_len,
-                truncation_strategy="longest_first",
-            )[0]
-        return batch
-
-    def pad_batch_data(self, batches, padding_strategy="longest", padding_max_len=None, pad_to_multiple_of=None):
-        input_ids = self.tokenizer.pad(
-            {"input_ids": batches},
-            padding=padding_strategy,
-            padding_side="right",
-            max_length=padding_max_len,
-            return_attention_mask=False,
-            pad_to_multiple_of=pad_to_multiple_of,
-        )["input_ids"]
-
-        position_ids = make_position_ids_from_input_ids(input_ids)
-        return input_ids, position_ids
-
     def distribute_gather_and_pad_data(self, micro_batches):
         old_log_probs = [micro_batch["log_probs"] for micro_batch in micro_batches]
         ref_log_probs = [micro_batch["ref_log_probs"] for micro_batch in micro_batches]
@@ -1115,6 +1088,7 @@ class PPOTrainer(Trainer):
             dp_group = hcg.get_data_parallel_group()
         except AttributeError:
             pass
+
         new_batch = {
             "rewards": gather_and_pad(rewards, dp_group, sd_group, pad=False),
             "log_probs": gather_and_pad(old_log_probs, dp_group, sd_group),
@@ -1184,7 +1158,7 @@ class PPOTrainer(Trainer):
         with (
             guard_set_args(
                 args,
-                {"per_device_train_batch_size": self.args.per_device_prompt_batch_size},
+                {"per_device_train_batch_size": self.args.global_batch_size // self.args.dataset_world_size},
             ),
             guard_set_args(
                 self,
@@ -1258,7 +1232,6 @@ class PPOTrainer(Trainer):
 
             step = -1
             for prompt_only_batch in self.prompt_only_dataloader:
-
                 batch: DataProto = DataProto.from_single_dict(prompt_only_batch)
                 self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
                 # step 1-1: rollout data with actor model (eval) and reward model
@@ -1274,49 +1247,14 @@ class PPOTrainer(Trainer):
                 timer_scope_actor_model.start()
                 with reload_and_offload_scope(self, self.actor_model, self.reference_model):
                     with TimerScope(self.timers, RolloutStages.GENERATE):
-                        generated_batches = self.actor_trainer.generate_sequences(batch)
-                        cleanup_batches, indices, label_ids_batches = generated_batches
+                        batch = self.actor_trainer.generate_sequences(batch)
 
                     # step 2-1: compute logprob for rollout data
                     with TimerScope(self.timers, RolloutStages.ROLLOUT_LOGPROB):
-                        per_device_train_batch_size = self.args.per_device_train_batch_size
-                        micro_batches = []
-
-                        for i in range(0, len(cleanup_batches), per_device_train_batch_size):
-                            cur_batch = [
-                                self.truncate_batch_data(
-                                    batch,
-                                    truncate_max_len=self._model_config.max_position_embeddings,
-                                )
-                                for batch in cleanup_batches[i : i + per_device_train_batch_size]
-                            ]
-
-                            pad_to_multiple_of = (
-                                self.args.tensor_parallel_degree if self._model_config.sequence_parallel else None
-                            )
-                            input_ids, position_ids = self.pad_batch_data(
-                                cur_batch, pad_to_multiple_of=pad_to_multiple_of
-                            )
-                            prompt = prompt_only_batch["input_ids"][i : i + per_device_train_batch_size]
-
-                            micro_batch = {
-                                "prompt": prompt,
-                                "input_ids": input_ids,
-                                "position_ids": position_ids,
-                                "index": indices[i : i + per_device_train_batch_size],
-                                **(
-                                    {"label_ids": label_ids_batches[i : i + per_device_train_batch_size]}
-                                    if self.args.use_rm_server
-                                    else {}
-                                ),
-                            }
-
-                            with TimerScope(self.timers, RolloutStages.ROLLOUT_OLD_LOGPROB):
-                                micro_batch["log_probs"] = self.actor_trainer.compute_logprob(**micro_batch)
-                            with TimerScope(self.timers, RolloutStages.ROLLOUT_REF_LOGPROB):
-                                micro_batch["ref_log_probs"] = self.reference_trainer.compute_logprob(**micro_batch)
-                            micro_batches.append(micro_batch)
-
+                        with TimerScope(self.timers, RolloutStages.ROLLOUT_OLD_LOGPROB):
+                            batch["log_probs"] = self.actor_trainer.compute_logprob(**batch)
+                        with TimerScope(self.timers, RolloutStages.ROLLOUT_REF_LOGPROB):
+                            batch["ref_log_probs"] = self.reference_trainer.compute_logprob(**batch)
                 timer_scope_actor_model.stop()
 
                 # step 2-2: compute reward for rollout data
@@ -1331,17 +1269,16 @@ class PPOTrainer(Trainer):
                         self.reward_model if not self.args.use_rm_server else None,
                     ):
                         with TimerScope(self.timers, RolloutStages.ROLLOUT_REWARD_VALUE):
-                            for micro_batch in micro_batches:
-                                micro_batch["rewards"] = self.reward_trainer.compute_reward(
-                                    input_ids_tokenizer=self.tokenizer,
-                                    **micro_batch,
-                                )
-                                if self.args.rl_algorithm == "ppo":
-                                    micro_batch["reward_values"] = self.critic_trainer.compute_value(**micro_batch)
+                            batch["rewards"] = self.reward_trainer.compute_reward(
+                                input_ids_tokenizer=self.tokenizer,
+                                **batch,
+                            )
+                            if self.args.rl_algorithm == "ppo":
+                                batch["reward_values"] = self.critic_trainer.compute_value(**batch)
 
                 # prepare data for reinforce_plus_plus
                 if self.args.rl_algorithm == "reinforce_plus_plus":
-                    rl_batches = self.distribute_gather_and_pad_data(micro_batches)
+                    rl_batches = self.distribute_gather_and_pad_data(batch)
                 else:
                     rl_batches = micro_batches
 

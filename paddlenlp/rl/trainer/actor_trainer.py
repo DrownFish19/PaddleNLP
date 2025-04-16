@@ -23,6 +23,7 @@ from paddle.io import Dataset
 from paddle.utils import map_structure
 
 from ...data import DataCollator
+from ...datasets.rlhf_datasets.protocol import DataProto, TensorDict
 from ...generation import GenerationConfig
 from ...trainer.trainer import (
     EvalPrediction,
@@ -35,6 +36,7 @@ from ..models.ppo_model_utils import (
     RLHFPPOMixedLoss,
     create_startend_row_indices,
     gather_log_probabilities,
+    make_position_ids_from_input_ids,
 )
 from ..utils.infer_utils import infer_guard
 from .rl_trainer import RLTrainer
@@ -104,53 +106,80 @@ class ActorReferenceTrainer(RLTrainer):
         """
         return "actor_loss"
 
+    def truncate_batch_data(self, batch, truncate_max_len):
+        if len(batch) > truncate_max_len:
+            batch = self.tokenizer.truncate_sequences(
+                batch,
+                num_tokens_to_remove=len(batch) - truncate_max_len,
+                truncation_strategy="longest_first",
+            )[0]
+        return batch
+
+    def pad_batch_data(self, batches, padding_strategy="longest", padding_max_len=None, pad_to_multiple_of=None):
+        input_ids = self.tokenizer.pad(
+            {"input_ids": batches},
+            padding=padding_strategy,
+            padding_side="right",
+            max_length=padding_max_len,
+            return_attention_mask=False,
+            pad_to_multiple_of=pad_to_multiple_of,
+        )["input_ids"]
+
+        position_ids = make_position_ids_from_input_ids(input_ids)
+        return input_ids, position_ids
+
     @paddle.no_grad()
-    def generate_sequences(self, batch: Dict, do_eval=False) -> List[Dict[str, Any]]:
+    def generate_sequences(self, prompts: DataProto, do_eval=False) -> List[Dict[str, Any]]:
         cleanup_batches, indices, label_ids_batches = [], [], []
-
-        total_batch_size = batch["input_ids"].shape[0]
+        total_batch_size = prompts.batch["input_ids"].shape[0]
         per_device_rollout_batch_size = self.args.per_device_rollout_batch_size
-        with infer_guard(self.actor_trainer):
+        with infer_guard(self):
+            generated_batches = []
             for i in range(0, total_batch_size, per_device_rollout_batch_size):
-                micro_batch = map_structure(
-                    lambda tensor: tensor[i : i + per_device_rollout_batch_size],
-                    batch,
-                )
-                # generate for multi batches and then disable FuseMT model
-                generated_batches = self._generate_sequences(micro_batch)
+                micro_batch = prompts[i : i + per_device_rollout_batch_size]
 
-                # NOTE(drownfish19): do process for each micro_batch, prepare for split mode
-                micro_ret = self.remove_pad_tokens_after_generate(generated_batches)
-                micro_cleanup_batches, micro_indices, micro_label_ids_batches = micro_ret
-                cleanup_batches.extend(micro_cleanup_batches)
-                indices.extend(micro_indices)
-                label_ids_batches.extend(micro_label_ids_batches)
-            indices = np.concatenate(indices)
+                # generate for multi batches and then disable FuseMT model
+                generated_batch = self._generate_sequences(micro_batch)
+                generated_batches.append(generated_batch)
+
+        batch = DataProto.concat(generated_batches)
+        cur_batch = self.truncate_batch_data(
+            cleanup_batches, truncate_max_len=self._model_config.max_position_embeddings
+        )
+        if self._model_config.sequence_parallel:
+            pad_to_multiple_of = self.args.tensor_parallel_degree
+        else:
+            pad_to_multiple_of = None
+        input_ids, position_ids = self.pad_batch_data(cur_batch, pad_to_multiple_of=pad_to_multiple_of)
+        prompt = batch["input_ids"]
+
+        batch = {
+            "prompt": prompt,
+            "input_ids": input_ids,
+            "position_ids": position_ids,
+            "index": indices,
+            **({"label_ids": label_ids_batches} if self.args.use_rm_server else {}),
+        }
+
         self.timers and dist.get_world_size() > 1 and dist.barrier()
         return cleanup_batches, indices, label_ids_batches
 
     @paddle.no_grad()
-    def _generate_sequences(self, prompt_only_batch: Dict, do_eval=False) -> List[Dict[str, Any]]:
+    def _generate_sequences(self, micro_batch: DataProto, do_eval=False) -> DataProto:
         """Rollout a batch of experiences."""
-        input_ids = prompt_only_batch["input_ids"]
-        # attention_mask = prompt_only_batch["attention_mask"]
+        input_ids = micro_batch.batch["input_ids"]
+        batch_size = input_ids.shape[0]
         if do_eval:
-            train_num_return_sequences = self.args.rollout_n
+            train_rollout_n = self.args.rollout_n
             self.args.rollout_n = 1
-
-        # position_ids = (
-        #     prompt_only_batch["position_ids"]
-        #     if "position_ids" in prompt_only_batch
-        #     else make_position_ids(attention_mask)
-        # )
 
         if self.args.rollout_n > 1:
             input_ids = input_ids.repeat_interleave(self.args.rollout_n, axis=0)
-            # raw_dtype = attention_mask.dtype
-            # attention_mask = (
-            #     attention_mask.cast("int32").repeat_interleave(self.args.rollout_n, axis=0).cast(raw_dtype)
-            # )
-            # position_ids = position_ids.repeat_interleave(self.args.rollout_n, axis=0)
+            if self.args.use_rm_server:
+                label_ids = micro_batch.batch["label_ids"]
+                label_ids = label_ids.repeat_interleave(self.args.rollout_n, axis=0)
+            else:
+                label_ids = None
 
         with guard_set_args(self.model.config, {"use_fused_head_and_loss_fn": False}):
             sequences = self.get_model(False).generate(
@@ -162,60 +191,44 @@ class ActorReferenceTrainer(RLTrainer):
                 do_eval=do_eval,
             )[0]
 
-        if self.args.use_rm_server:
-            label_ids = prompt_only_batch["label_ids"]
-            if self.args.rollout_n > 1:
-                label_ids = label_ids.repeat_interleave(self.args.rollout_n, axis=0)
+        indices = []
+        for _ in range(batch_size):
+            indices.extend([str(uuid.uuid4())] * self.args.rollout_n)
+        indices = np.array(indices, dtype=object)
 
-        sequences = sequences.reshape([input_ids.shape[0] // self.args.rollout_n, self.args.rollout_n, -1])
+        # sequences, label_ids = self._post_process_generate_outputs(sequences, label_ids)
+
         if do_eval:
-            self.args.rollout_n = train_num_return_sequences
-            sequences = sequences.transpose([1, 0, 2])
-        # prompt, sequence, attention_mask
-        return [
+            self.args.rollout_n = train_rollout_n
+
+        # prompt : [batch_size*rollout_n, seq_len]
+        # input_ids : [batch_size*rollout_n, seq_len]
+        # indexes : [batch_size*rollout_n]
+        batch = TensorDict(
             {
                 "prompt": input_ids,
-                "input_ids": seq,
-                **({"label_ids": label_ids[idx * len(seq) : (idx + 1) * len(seq)]} if self.args.use_rm_server else {}),
-                "index": np.array([str(uuid.uuid4())] * len(seq), dtype=object),
-                # "attention_mask": make_attention_mask(
-                #     seq,
-                #     pad_id=self.tokenizer.pad_token_id,
-                #     eos_id=None,
-                #     unk_id=self.tokenizer.unk_token_id,
-                #     causal_mask=True,
-                # ).cast(self._model_config.dtype),
-                # "sequence_mask": make_attention_mask(
-                #     seq,
-                #     pad_id=self.tokenizer.pad_token_id,
-                #     eos_id=None,
-                #     unk_id=self.tokenizer.unk_token_id,
-                #     causal_mask=False,
-                # ).cast(self._model_config.dtype),
-            }
-            for idx, seq in enumerate(sequences)
-        ]
+                "input_ids": sequences,
+                **({"label_ids": label_ids} if self.args.use_rm_server else {}),
+            },
+            batch_size=[batch_size * self.args.rollout_n],
+        )
+        non_tensor_batch = {
+            "index": indices,
+        }
+        return DataProto(batch, non_tensor_batch)
 
-    def remove_pad_tokens_after_generate(self, generated_batches):
-        cleanup_batches, indices, label_ids_batches = [], [], []
+    def _post_process_generate_outputs(self, sequences: paddle.Tensor, label_ids: paddle.Tensor) -> List[List[int]]:
+        output_sequences, output_label_ids = [], []
 
-        for batch in generated_batches:
-            cleanup_batches.extend(
-                [
-                    process_row(row, remove_value=self.tokenizer.pad_token_id, remove_side="right")
-                    for row in batch["input_ids"]
-                ]
+        for sequence, label_id in zip(sequences, label_ids):
+            output_sequences.append(
+                process_row(sequence, remove_value=self.tokenizer.pad_token_id, remove_side="right")
             )
-            if self.args.use_rm_server:
-                label_ids_batches.extend(
-                    [
-                        process_row(row, remove_value=self.tokenizer.pad_token_id, remove_side="right")
-                        for row in batch["label_ids"]
-                    ]
-                )
-            indices.append(batch["index"])
+            output_label_ids.append(
+                process_row(label_id, remove_value=self.tokenizer.pad_token_id, remove_side="left")
+            )
 
-        return cleanup_batches, indices, label_ids_batches
+        return output_sequences, output_label_ids
 
     @paddle.no_grad()
     def compute_logprob(self, input_ids: paddle.Tensor, position_ids: paddle.Tensor = None, **kwargs) -> paddle.Tensor:
@@ -244,21 +257,8 @@ class ActorReferenceTrainer(RLTrainer):
         """
         log_probs_list = []
         batch_size, sequence_length = input_ids.shape
-        if self.args.rollout_logprob_batch_size is None:
-            rollout_logprob_batch_size = batch_size
-        else:
-            if str(self.args.rollout_logprob_batch_size).lower() == "auto":
-                # Auto compute
-                if sequence_length > 4096 - 128:
-                    rollout_logprob_batch_size = 2
-                elif sequence_length > 2048 - 128:
-                    rollout_logprob_batch_size = 4
-                else:
-                    rollout_logprob_batch_size = batch_size
-            else:
-                rollout_logprob_batch_size = int(self.args.rollout_logprob_batch_size)
-
-        num_batches = (batch_size + rollout_logprob_batch_size - 1) // rollout_logprob_batch_size
+        per_device_logprob_batch_size = self.args.per_device_logprob_batch_size
+        num_batches = (batch_size + per_device_logprob_batch_size - 1) // per_device_logprob_batch_size
 
         # Pipe model outputs a logits tensor with LMHead, while non-pipe model
         # outputs a tuple with logits tensor as the only one element.
@@ -267,8 +267,8 @@ class ActorReferenceTrainer(RLTrainer):
 
         for i in range(num_batches):
             # Calculate the start and end indices for the current batch
-            start_index = i * rollout_logprob_batch_size
-            end_index = min(start_index + rollout_logprob_batch_size, batch_size)
+            start_index = i * per_device_logprob_batch_size
+            end_index = min(start_index + per_device_logprob_batch_size, batch_size)
 
             # Extract the current batch
             current_input_ids = input_ids[start_index:end_index]
