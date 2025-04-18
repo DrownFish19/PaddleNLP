@@ -85,45 +85,53 @@ class RewardTrainer(RLTrainer):
         label_ids: paddle.Tensor = None,
         **kwargs,
     ) -> Dict[str, paddle.Tensor]:
-        if not self.args.use_rm_server:
-            if self.tokenizer is not input_ids_tokenizer:
-                # right padding
-                reward_tokenize_output = batch_retokenize(
-                    input_ids,
-                    src_tokenizer=input_ids_tokenizer,
-                    dest_tokenizer=self.tokenizer,
+        pre_device_reward_batch_size = self.args.per_device_eval_batch_size
+        reward_scores = []
+
+        for i in range(0, input_ids.shape[0], pre_device_reward_batch_size):
+            cur_input_ids = input_ids[i : i + pre_device_reward_batch_size]
+            cur_position_ids = position_ids[i : i + pre_device_reward_batch_size]
+            cur_label_ids = label_ids[i : i + pre_device_reward_batch_size]
+
+            if not self.args.use_rm_server:
+                if self.tokenizer is not input_ids_tokenizer:
+                    # right padding
+                    reward_tokenize_output = batch_retokenize(
+                        cur_input_ids,
+                        src_tokenizer=input_ids_tokenizer,
+                        dest_tokenizer=self.tokenizer,
+                    )
+                    reward_input_ids = reward_tokenize_output["input_ids"]
+                    reward_position_ids = reward_tokenize_output["position_ids"]
+                else:
+                    reward_input_ids = cur_input_ids
+                    reward_position_ids = cur_position_ids
+
+                attn_mask_startend_row_indices = create_startend_row_indices(
+                    reward_input_ids, self.tokenizer.pad_token_id
                 )
-                reward_input_ids = reward_tokenize_output["input_ids"]
-                reward_position_ids = reward_tokenize_output["position_ids"]
+                reward_score = self.model(
+                    reward_input_ids,
+                    attention_mask=None,
+                    attn_mask_startend_row_indices=attn_mask_startend_row_indices,
+                    position_ids=reward_position_ids,
+                )[1]
             else:
-                reward_input_ids = input_ids
-                reward_position_ids = position_ids
+                prompt_len = kwargs["prompt"].shape[-1]
+                if cur_label_ids is None:
+                    raise ValueError("Rule-based reward needs labels.")
+                src = input_ids_tokenizer.batch_decode(cur_input_ids[:, :prompt_len], skip_special_tokens=False)
+                tgt = input_ids_tokenizer.batch_decode(cur_label_ids, skip_special_tokens=False)
+                response = input_ids_tokenizer.batch_decode(cur_input_ids[:, prompt_len:], skip_special_tokens=False)
+                reward_score = self.request_reward_server(
+                    [i.replace(self.tokenizer.pad_token, "") for i in src],
+                    [i.replace(self.tokenizer.pad_token, "") for i in tgt],
+                    [i.replace(self.tokenizer.pad_token, "") for i in response],
+                )
 
-            attn_mask_startend_row_indices = create_startend_row_indices(reward_input_ids, self.tokenizer.pad_token_id)
-            reward_score = self.model(
-                reward_input_ids,
-                attention_mask=None,
-                attn_mask_startend_row_indices=attn_mask_startend_row_indices,
-                position_ids=reward_position_ids,
-            )[1]
-        else:
-            prompt_len = kwargs["prompt"].shape[-1]
-            if label_ids is None:
-                raise ValueError("Rule-based reward needs labels.")
-            src = input_ids_tokenizer.batch_decode(input_ids[:, :prompt_len], skip_special_tokens=False)
-            tgt = input_ids_tokenizer.batch_decode(label_ids, skip_special_tokens=False)
-            response = input_ids_tokenizer.batch_decode(input_ids[:, prompt_len:], skip_special_tokens=False)
-            reward_score = self.request_reward_server(
-                [i.replace(self.tokenizer.pad_token, "") for i in src],
-                [i.replace(self.tokenizer.pad_token, "") for i in tgt],
-                [i.replace(self.tokenizer.pad_token, "") for i in response],
-            )
-
-        reward_score = reward_score.squeeze(axis=-1)
-
-        return reward_score
-        # if self.args.rl_algorithm in ["grpo", "reinforce_plus_plus"]:
-        #     return {"rewards": reward_score}
+            reward_score = reward_score.squeeze(axis=-1)
+            reward_scores.append(reward_score)
+        return paddle.concat(reward_scores, axis=0)
 
     def request_reward_server(self, src, tgt, response):
         data = {"src": src, "tgt": tgt, "response": response}

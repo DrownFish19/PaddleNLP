@@ -28,11 +28,11 @@ from paddle import nn
 from paddle.distributed import fleet
 from paddle.distributed.fleet.meta_parallel import PipelineLayer
 from paddle.io import DataLoader, Dataset, DistributedBatchSampler
-from paddle.utils import map_structure
 from rich.console import Console
 from rich.table import Table
 
 from ...data import DataCollator
+from ...datasets.rlhf_datasets.protocol import DataProto
 from ...trainer.trainer import (
     EvalLoopOutput,
     EvalPrediction,
@@ -55,6 +55,8 @@ from ...transformers import (
 from ...transformers.model_utils import _add_variant
 from ...utils.env import PADDLE_WEIGHTS_NAME
 from ..algos.advantage import (
+    add_kl_divergence_regularization,
+    compute_gae_advantage_return,
     compute_grpo_advantages,
     compute_reinforce_plus_plus_advantages_and_returns,
 )
@@ -84,7 +86,6 @@ from .trainer_utils import (
     batch_retokenize,
     guard_set_args,
     is_same_tokenizer,
-    process_row,
 )
 
 
@@ -1010,11 +1011,7 @@ class PPOTrainer(Trainer):
         if not self._is_iterable_dataset(self.train_dataset):
             len_dataloader = len(train_dataloader)
             num_train_sub_steps = (
-                len_dataloader
-                * self.args.update_iters
-                * self.args.per_device_prompt_batch_size
-                * self.args.num_return_sequences
-                // self.args.per_device_train_batch_size
+                len_dataloader * self.args.update_iters * self.args.global_batch_size * self.args.rollout_n
             )
             num_update_steps_per_epoch = num_train_sub_steps // args.gradient_accumulation_steps
             num_examples = len(self.train_dataset)
@@ -1078,59 +1075,6 @@ class PPOTrainer(Trainer):
             rl_loss.update(value_loss)
         return rl_loss
 
-    def remove_pad_tokens_after_generate(self, generated_batches):
-        cleanup_batches, indices, label_ids_batches = [], [], []
-
-        for batch in generated_batches:
-            cleanup_batches.extend(
-                [
-                    process_row(
-                        row,
-                        remove_value=self.tokenizer.pad_token_id,
-                        remove_side="right",
-                        eos_token_id=self.tokenizer.eos_token_id,
-                    )
-                    for row in batch["input_ids"]
-                ]
-            )
-            if self.args.use_rm_server:
-                label_ids_batches.extend(
-                    [
-                        process_row(
-                            row,
-                            remove_value=self.tokenizer.pad_token_id,
-                            remove_side="left",
-                            eos_token_id=self.tokenizer.eos_token_id,
-                        )
-                        for row in batch["label_ids"]
-                    ]
-                )
-            indices.append(batch["index"])
-
-        return cleanup_batches, indices, label_ids_batches
-
-    def truncate_batch_data(self, batch, truncate_max_len):
-        if len(batch) > truncate_max_len:
-            batch = self.tokenizer.truncate_sequences(
-                batch,
-                num_tokens_to_remove=len(batch) - truncate_max_len,
-                truncation_strategy="longest_first",
-            )[0]
-        return batch
-
-    def pad_batch_data(self, batches, padding_strategy="longest", padding_max_len=None, pad_to_multiple_of=None):
-        input_ids = self.tokenizer.pad(
-            {"input_ids": batches},
-            padding=padding_strategy,
-            padding_side="right",
-            max_length=padding_max_len,
-            return_attention_mask=False,
-            pad_to_multiple_of=pad_to_multiple_of,
-        )["input_ids"]
-
-        position_ids = make_position_ids_from_input_ids(input_ids)
-        return input_ids, position_ids
-
     def distribute_gather_and_pad_data(self, micro_batches):
         # group index for grpo
         index = [micro_batch["index"] for micro_batch in micro_batches]
@@ -1149,6 +1093,7 @@ class PPOTrainer(Trainer):
             dp_group = hcg.get_data_parallel_group()
         except AttributeError:
             pass
+
         new_batch = {
             "index": gather_and_pad(index, dp_group, sd_group, pad=False),
             "rewards": gather_and_pad(rewards, dp_group, sd_group, pad=False),
@@ -1277,7 +1222,7 @@ class PPOTrainer(Trainer):
         with (
             guard_set_args(
                 args,
-                {"per_device_train_batch_size": self.args.per_device_prompt_batch_size},
+                {"per_device_train_batch_size": self.args.global_batch_size // self.args.dataset_world_size},
             ),
             guard_set_args(
                 self,
@@ -1358,6 +1303,7 @@ class PPOTrainer(Trainer):
 
             step = -1
             for prompt_only_batch in self.prompt_only_dataloader:
+                batch: DataProto = DataProto.from_single_dict(prompt_only_batch)
                 self.control = self.callback_handler.on_step_begin(args, self.state, self.control)
                 # step 1-1: rollout data with actor model (eval) and reward model
                 self.set_eval()
@@ -1639,8 +1585,7 @@ class PPOTrainer(Trainer):
                     with reload_and_offload_scope(self, self.actor_model, self.actor_trainer.optimizer):
                         with TimerScope(self.timers, ActorStages.RL_STEP):
                             # timer_info = {} # prepare for each micro_step
-
-                            for micro_step, rl_batch in enumerate(train_batch):
+                            for micro_step, rl_batch in enumerate(train_batch * self.args.update_iters):
                                 step = 0 if step == -1 else step
                                 with TimerScopeManualLabel(
                                     self.timers,
@@ -1809,47 +1754,6 @@ class PPOTrainer(Trainer):
         with guard_set_args(self.control, {"should_log": False}):
             super()._maybe_log_save_evaluate(tr_loss, model, epoch, ignore_keys_for_eval)
 
-    def add_kl_divergence_regularization(
-        self,
-        prompt: paddle.Tensor,  # size = (B, S) # pylint: disable=unused-argument
-        log_probs: paddle.Tensor,  # size = (B, L)
-        ref_log_probs: paddle.Tensor,  # size = (B, L)
-        reward_score: paddle.Tensor,  # size = (B,)
-        sequence_mask: paddle.Tensor,  # size = (B, L)
-    ) -> paddle.Tensor:
-        """
-        Calculate the KL divergence regularization gain and add it to the reward.
-
-        Args:
-            prompt (paddle.Tensor, shape=(B, S)): The prompt of the input sequence, not used.
-            log_probs (paddle.Tensor, shape=(B, L)): The log probability distribution of the current predictions.
-            ref_log_probs (paddle.Tensor, shape=(B, L)): The log probability distribution of the baseline predictions.
-            reward_score (paddle.Tensor, shape=(B,)): The base reward score based on the prompt and output sequence.
-            sequence_mask (paddle.Tensor, shape=(B, L)): The mask of the sequence, used to determine the length of the sequence.
-
-        Returns:
-            paddle.Tensor, shape=(B, L): A vector containing the KL divergence regularization gain.
-        """
-
-        kl_divergence_estimate = -self.kl_coeff * (log_probs - ref_log_probs)  # size = (B, L)
-        rewards = kl_divergence_estimate  # size = (B, L)
-        reward_clip = paddle.clip(  # size = (B,)
-            reward_score,
-            min=-self.clip_range_score,
-            max=self.clip_range_score,
-        )
-        # TODO(guosheng): use scatter_add/put_along_axis
-        index = paddle.cumsum(sequence_mask.cast(paddle.int64), axis=-1).argmax(-1, keepdim=True)
-
-        rewards = paddle.put_along_axis(
-            rewards,
-            index,
-            reward_clip.unsqueeze(axis=-1),
-            axis=-1,
-            reduce="add",
-        )
-        return rewards, kl_divergence_estimate
-
     def get_advantages_and_returns(
         self,
         values: paddle.Tensor,
@@ -1966,29 +1870,35 @@ class PPOTrainer(Trainer):
             elif self.args.rl_algorithm == "ppo":
                 start = rl_batch["prompt"].shape[-1] - 1
                 eos_mask = (rl_batch["input_ids"] != self.tokenizer.pad_token_id)[:, 1:].to(old_log_probs.dtype)
-                rewards_with_kl, kl_rewards = self.add_kl_divergence_regularization(
+                rewards_with_kl, kl_rewards = add_kl_divergence_regularization(
                     None,  # prompt,
                     old_log_probs,
                     ref_log_probs,
                     rewards,
                     eos_mask[:, start:],
+                    self.kl_coeff,
+                    self.clip_range_score,
                 )  # length: tgt if use_tgt_len_value src + tgt -1
-                reward_advantages, reward_returns = self.get_advantages_and_returns(
-                    old_reward_values,
+                reward_advantages, reward_returns = compute_gae_advantage_return(
                     rewards_with_kl,
+                    old_reward_values,
                     eos_mask[:, start:],
                     start=0 if use_tgt_len_value else start,
+                    gamma=self.gamma,
+                    lam=self.gae_lambda,
                     use_tgt_len_return=use_tgt_len_value,
                 )  # length: tgt if use_tgt_len_value src + tgt -1
             elif self.args.rl_algorithm == "reinforce_plus_plus":
                 start = 0
                 eos_mask = rl_batch["eos_mask"]
-                rewards_with_kl, kl_rewards = self.add_kl_divergence_regularization(
+                rewards_with_kl, kl_rewards = add_kl_divergence_regularization(
                     None,  # prompt,
                     old_log_probs,
                     ref_log_probs,
                     rewards,
                     eos_mask[:, start:],
+                    self.kl_coeff,
+                    self.clip_range_score,
                 )  # length: tgt if use_tgt_len_value src + tgt -1
                 reward_advantages, reward_returns = compute_reinforce_plus_plus_advantages_and_returns(
                     rewards_with_kl,
